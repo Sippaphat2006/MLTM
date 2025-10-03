@@ -16,7 +16,7 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('MLTM server is up'));
 app.use('/api', serverRouter);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // // only listen after DB is reachable

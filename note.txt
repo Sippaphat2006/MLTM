@@ -1,6 +1,4 @@
-phpMyAdmin
-
-
+phpMyAdmin : MLTM 
 
 user account:
 root
@@ -12,3 +10,24 @@ CUEr5xeM7bYnWgjP
 mtlm_dashboard
 LXJFVCVZYLsOPNQO
 
+
+API function control
+
+Name                        Function                                                     URL                                        Params
+
+healthDb:	                Quick DB connectivity check (ping + version/db/user).	     GET /api/health/db
+getColors:                  List tower-light color definitions for UI (name + hex).      GET /api/colors
+getMachines:                List machines to build sidebar/cards.                        GET /api/machines
+getMachineCurrentStatus:    Current (open) status for one machine.                       GET /api/machines/:code/status/current     :code = machine code (e.g., CNC1)
+getMachineByDate:           Daily distribution (seconds per color) —                     GET /api/machines/:code/status/by-date     :code, query date=YYYY-MM-DD
+                            for pie/bar/summary of a selected day.
+getMachineTimeline:         Raw intervals for a day (start_time/end_time) —              GET /api/machines/:code/timeline           :code, query date=YYYY-MM-DD
+                            for Gantt/timeline.
+getMachineWeekly:	        7-day buckets (per color) starting from week_start —         GET /api/machines/:code/status/weekly	    :code, query week_start=YYYY-MM-DD
+                            for weekly charts.	
+getOverviewToday:	        Dashboard overview: for each machine →                       GET /api/overview/today
+                            current status + today buckets.	GET /api/overview/today
+postIngest:                 Insert a status interval (historical or closed segment).     POST /api/ingest	                        body { machine_code, 
+                                                                                                                                    color, started_at, ended_at? }
+postIngestNow:	            Close any open interval and start a new one now with         POST /api/ingest/now                       body { machine_code, color }
+                            a color (quick toggle).
