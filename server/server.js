@@ -6,7 +6,6 @@ const cors = require('cors');
 
 // API router
 const serverRouter = require('./server_router');
-
 const app = express();
 //const HOST = '192.168.0.233';
 
@@ -16,7 +15,7 @@ app.use(express.json());
 app.get('/', (req, res) => res.send('MLTM server is up'));
 app.use('/api', serverRouter);
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // // only listen after DB is reachable

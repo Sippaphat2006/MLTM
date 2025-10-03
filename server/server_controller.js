@@ -283,17 +283,6 @@ const postIngestNow = async (req, res) => {
   }
 };
 
-const getDepAll = (req, res) => {
-  //res.status(200).json({ message: 'getDepAll works' });
-  db.query('db_mltm', 'SELECT * FROM machines')
-    .then((results) => {
-      res.status(200).json(results);
-    })
-    .catch((err) => {
-      console.error('Error executing query:', err);
-      res.status(500).json({ error: 'Internal server error' });
-    });
-};
 
 module.exports = {
   // health/meta
@@ -314,5 +303,4 @@ module.exports = {
   postIngest,
   postIngestNow,
 
-  getDepAll,
 };
