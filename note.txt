@@ -1,0 +1,14 @@
+phpMyAdmin
+
+
+
+user account:
+root
+castem300
+
+mtlm_api
+CUEr5xeM7bYnWgjP
+
+mtlm_dashboard
+LXJFVCVZYLsOPNQO
+
