@@ -139,6 +139,17 @@ function normalizeColor(c){
   return AllowedColors.includes(s) ? s : 'unknown';
 }
 
+function pad2(n){ return String(n).padStart(2,'0'); }
+function secToHMS(sec){
+  const s = Math.max(0, Math.floor(sec));
+  const hh = Math.floor(s/3600);
+  const mm = Math.floor((s%3600)/60);
+  const ss = s % 60;
+  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+}
+function hrsToHMS(hours){ return secToHMS(Math.round(Number(hours||0)*3600)); }
+
+
 /* ===========================
    API WRAPPERS (stick to router)
    =========================== */
@@ -158,7 +169,6 @@ async function apiGetCurrent(code){
   return fetchJSON(`/machines/${encodeURIComponent(code)}/status/current`);
 }
 async function apiGetDailyBuckets(code, dateYMD){
-  // GET /machines/:code/status/by-date?date=YYYY-MM-DD -> [{color,seconds}, ...]
   const rows = await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-date?date=${encodeURIComponent(dateYMD)}`);
   const sec = { green:0, yellow:0, red:0 };
   for (const r of rows || []) {
@@ -166,9 +176,12 @@ async function apiGetDailyBuckets(code, dateYMD){
     if (AllowedColors.includes(c)) sec[c] += Number(r.seconds || 0);
   }
   return {
-    green: round2(sec.green/3600),
-    yellow: round2(sec.yellow/3600),
-    red:   round2(sec.red/3600),
+    seconds: { ...sec },
+    hours: {
+      green: round2(sec.green/3600),
+      yellow: round2(sec.yellow/3600),
+      red:   round2(sec.red/3600),
+    }
   };
 }
 async function apiGetWeekly(code, weekStartYMD){
@@ -208,7 +221,18 @@ const lineChart = new Chart(document.getElementById('lineChart').getContext('2d'
   },
   options:{
     responsive:true,
-    plugins:{ legend:{ position:'top' }, title:{ display:true, text:'Tower Light Hours per Week' } },
+    plugins:{ 
+      legend:{ position:'top' }, 
+      title:{ display:true, text:'Tower Light Hours per Week' },
+      tooltip:{
+        callbacks:{
+          label:(ctx)=>{
+            const hours = ctx.parsed.y;
+            return `${ctx.dataset.label}: ${hrsToHMS(hours)} (${hours.toFixed(2)} h)`;
+          }
+        }
+      }
+    },
     scales:{
       y:{ beginAtZero:true, max:24, ticks:{ stepSize:2 }, title:{ display:true, text:'Hours'} },
       x:{ title:{ display:true, text:'Day of Week'} }
@@ -219,13 +243,41 @@ const lineChart = new Chart(document.getElementById('lineChart').getContext('2d'
 const pieChart = new Chart(document.getElementById('pieChart').getContext('2d'), {
   type:'pie',
   data:{ labels:['Green','Yellow','Red'], datasets:[{ data:[0,0,0], backgroundColor:[Colors.green,Colors.yellow,Colors.red], hoverOffset:4 }]},
-  options:{ responsive:true, plugins:{ legend:{ position:'top' }, title:{ display:true, text:'Tower Light Daily Distribution'} } }
+  options:{ 
+    responsive:true, 
+    plugins:{ 
+      legend:{ position:'top' },
+      title:{ display:true, text:'Tower Light Daily Distribution'},
+      tooltip:{
+        callbacks:{
+          label: (ctx)=>{
+            const label = ctx.label || '';
+            const hours = ctx.parsed;      // ค่าที่ใส่ลงกราฟ (ชั่วโมง)
+            return `${label}: ${hrsToHMS(hours)} (${hours.toFixed(2)} h)`;
+          }
+        }
+      }
+    }
+  }
 });
 
 const barChart = new Chart(document.getElementById('barChart').getContext('2d'), {
   type:'bar',
   data:{ labels:['Green','Yellow','Red'], datasets:[{ label:'Hours', data:[0,0,0], backgroundColor:[Colors.green,Colors.yellow,Colors.red] }]},
-  options:{ responsive:true, plugins:{ legend:{ display:false }, title:{ display:true, text:'Tower Light Hours by Color'} },
+  options:{ 
+    responsive:true, 
+    plugins:{ 
+      legend:{ display:false }, 
+      title:{ display:true, text:'Tower Light Hours by Color'},
+      tooltip:{
+        callbacks:{
+          label:(ctx)=>{
+            const hours = ctx.raw;
+            return `${ctx.label}: ${hrsToHMS(hours)} (${hours.toFixed(2)} h)`;
+          }
+        }
+      }
+    },
     scales:{ y:{ beginAtZero:true, max:24, ticks:{ stepSize:2 }, title:{ display:true, text:'Hours'} }, x:{ title:{ display:true, text:'Color'} } } }
 });
 
@@ -251,24 +303,33 @@ function applyThemeColors(){
   summaryChart.data.datasets[0].backgroundColor = [g,y,r];
   lineChart.update(); pieChart.update(); barChart.update(); summaryChart.update();
 }
-function updateSummaryWidget(green,yellow,red){
-  const total = green+yellow+red;
-  const percent = total>0 ? ((green/total)*100).toFixed(1) : 0;
-  summaryChart.data.datasets[0].data = [green,yellow,red];
+function updateSummaryWidgetSeconds(secGreen, secYellow, secRed){
+  const total = secGreen + secYellow + secRed;
+  const percent = total>0 ? ((secGreen/total)*100).toFixed(1) : 0;
+
+  summaryChart.data.datasets[0].data = [
+    round2(secGreen/3600), round2(secYellow/3600), round2(secRed/3600)
+  ];
   summaryChart.update();
+
   document.getElementById('summaryText').innerHTML =
     `<div style="font-size:20px;font-weight:bold; margin-bottom:5px;">${percent}%</div>
-     <div>● <span style="color:${Colors.green}">Green</span>: ${green} h</div>
-     <div>● <span style="color:${Colors.yellow}">Yellow</span>: ${yellow} h</div>
-     <div>● <span style="color:${Colors.red}">Red</span>: ${red} h</div>`;
+     <div>● <span style="color:${Colors.green}">Green</span>: ${secToHMS(secGreen)}</div>
+     <div>● <span style="color:${Colors.yellow}">Yellow</span>: ${secToHMS(secYellow)}</div>
+     <div>● <span style="color:${Colors.red}">Red</span>: ${secToHMS(secRed)}</div>`;
 }
+
 function updateDailyCharts(daily){
-  pieChart.data.datasets[0].data = [daily.green,daily.yellow,daily.red];
+  // กราฟยังใช้ "ชั่วโมง"
+  pieChart.data.datasets[0].data = [daily.hours.green,daily.hours.yellow,daily.hours.red];
   pieChart.update();
-  barChart.data.datasets[0].data = [daily.green,daily.yellow,daily.red];
+  barChart.data.datasets[0].data = [daily.hours.green,daily.hours.yellow,daily.hours.red];
   barChart.update();
-  updateSummaryWidget(daily.green,daily.yellow,daily.red);
+
+  // ข้อความสรุปโชว์ HH:MM:SS
+  updateSummaryWidgetSeconds(daily.seconds.green, daily.seconds.yellow, daily.seconds.red);
 }
+
 function updateWeeklyCharts(weekly){
   lineChart.data.datasets[0].data = weekly.green;
   lineChart.data.datasets[1].data = weekly.yellow;
