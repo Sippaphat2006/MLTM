@@ -284,6 +284,72 @@ const postIngestNow = async (req, res) => {
 };
 
 
+// POST /api/ingest/upsert
+// body: { machine_code: "CNC1", color: "green" | "yellow" | "red", ts?: "YYYY-MM-DD HH:mm:ss" }
+const postUpsertStatus = async (req, res) => {
+  try {
+    const { machine_code, color, ts } = req.body || {};
+    if (!machine_code || !color) {
+      return res.status(400).json({ error: 'missing fields' });
+    }
+
+    // resolve machine
+    const mrows = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=?', [machine_code]);
+    if (!mrows.length) return res.status(404).json({ error: 'machine not found' });
+    const mid = mrows[0].id;
+
+    // resolve color
+    const crows = await db.query('db_mltm', 'SELECT id FROM status_colors WHERE name=?', [color]);
+    if (!crows.length) return res.status(400).json({ error: 'bad color' });
+    const colorId = crows[0].id;
+
+    const now = ts ? new Date(ts) : new Date();
+
+    // last interval for this machine
+    const last = await db.query('db_mltm', `
+      SELECT id, color_id
+      FROM machine_status
+      WHERE machine_id=?
+      ORDER BY start_time DESC
+      LIMIT 1
+    `, [mid]);
+
+    if (!last.length) {
+      // first row today/ever → open immediately
+      await db.query('db_mltm',
+        'INSERT INTO machine_status(machine_id,color_id,start_time,end_time) VALUES (?,?,?,?)',
+        [mid, colorId, now, now]
+      );
+      return res.status(201).json({ ok: true, action: 'opened' });
+    }
+
+    if (last[0].color_id === colorId) {
+      // heartbeat (same color) → extend end_time
+      await db.query('db_mltm',
+        'UPDATE machine_status SET end_time=? WHERE id=?',
+        [now, last[0].id]
+      );
+      return res.json({ ok: true, action: 'heartbeat' });
+    }
+
+    // color changed → close last, open new at 'now'
+    await db.query('db_mltm',
+      'UPDATE machine_status SET end_time=? WHERE id=?',
+      [now, last[0].id]
+    );
+    await db.query('db_mltm',
+      'INSERT INTO machine_status(machine_id,color_id,start_time,end_time) VALUES (?,?,?,?)',
+      [mid, colorId, now, now]
+    );
+
+    res.status(201).json({ ok: true, action: 'switched' });
+  } catch (err) {
+    console.error('postUpsertStatus error:', err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
+
 module.exports = {
   // health/meta
   healthDb,
@@ -302,5 +368,6 @@ module.exports = {
   // ingest
   postIngest,
   postIngestNow,
+  postUpsertStatus,
 
 };

@@ -23,5 +23,7 @@ router.get('/overview/today', ctrl.getOverviewToday);
 // Ingest
 router.post('/ingest', ctrl.postIngest);
 router.post('/ingest/now', ctrl.postIngestNow);
+router.post('/ingest/upsert', ctrl.postUpsertStatus);
+
 
 module.exports = router;
