@@ -12,18 +12,7 @@ const databases = {
     //port: 8081,
     queueLimit: 0
   }).promise(),
-
-  /*
-  db_maintenance: mysql.createPool({
-    host: 'localhost',
-    user: 'root',
-    password: 'castem300',
-    database: 'maintenance',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-  }).promise(),*/
-
+  
 };
 
 // ฟังก์ชัน Query แบบเลือก Database

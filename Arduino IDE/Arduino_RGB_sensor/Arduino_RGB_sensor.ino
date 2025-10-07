@@ -10,9 +10,13 @@ const char* WIFI_SSID = "ADM_CSC_IP_2.4GHz";
 const char* WIFI_PASS = "komataisen2024";
 
 const char* SERVER_BASE   = "http://192.168.11.186:3000/api";
-const char* ENDPOINT_PATH = "/ingest/now";
-const char* MACHINE_CODE  = "CNC4";
+const char* EP_NOW        = "/ingest/now";     // close+open on known, close on unknown
+const char* EP_UPSERT     = "/ingest/upsert";  // heartbeat: extend end_time on same color
+const char* MACHINE_CODE  = "CNC1";
 const char* API_KEY       = "";   // optional: X-API-Key
+
+// --- Heartbeat: update end_time while same color persists ---
+#define HEARTBEAT_MS 10000  // set 0 to disable
 
 // TCS34725 sensor tuning
 #define TCS_INTEG  TCS34725_INTEGRATIONTIME_50MS
@@ -32,12 +36,17 @@ const bool RESEND_AT_MIDNIGHT = true;
 const long GMT_OFFSET_SEC = 7 * 3600;
 const int  DST_OFFSET_SEC = 0;
 const char* NTP_SERVER    = "pool.ntp.org";
+
+// keep-alive
+const uint32_t KEEPALIVE_MS = 1000;
+uint32_t lastKeep = 0;
+
 // =======================
 
-Adafruit_TCS34725 tcs;  // default ctor
+Adafruit_TCS34725 tcs;
 
 enum Color { UNKNOWN=0, GREEN, YELLOW, RED };
-const char* cname(Color c){
+static inline const char* cname(Color c){
   switch(c){ case GREEN:return "green"; case YELLOW:return "yellow"; case RED:return "red"; default:return "unknown"; }
 }
 
@@ -69,9 +78,7 @@ void connectWiFi(){
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t t0=millis();
-  while(WiFi.status()!=WL_CONNECTED && millis()-t0<15000){
-    delay(300); Serial.print(".");
-  }
+  while(WiFi.status()!=WL_CONNECTED && millis()-t0<15000){ delay(300); Serial.print("."); }
   Serial.println();
   if(WiFi.status()==WL_CONNECTED){
     Serial.printf("[WiFi] Connected IP=%s RSSI=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
@@ -80,37 +87,46 @@ void connectWiFi(){
   }
 }
 
-bool postColor(Color c){
-  if(c==UNKNOWN) return false;
+bool httpPost(const char* path, const String& json){
   connectWiFi();
-  if(WiFi.status()!=WL_CONNECTED){ Serial.println("[POST] skipped: WiFi not connected"); return false; }
-
+  if(WiFi.status()!=WL_CONNECTED){ Serial.println("[HTTP] skipped: WiFi not connected"); return false; }
   HTTPClient http;
-  String url = String(SERVER_BASE)+String(ENDPOINT_PATH);
-  String body = String("{\"machine_code\":\"")+MACHINE_CODE+"\",\"color\":\""+cname(c)+"\"}";
-
+  String url = String(SERVER_BASE)+String(path);
   http.begin(url);
   http.addHeader("Content-Type","application/json");
   if(strlen(API_KEY)>0) http.addHeader("X-API-Key", API_KEY);
-
-  Serial.printf("[POST] %s body=%s\n", url.c_str(), body.c_str());
-  int code=http.POST(body);
-  String resp=http.getString();
-  http.end();
+  Serial.printf("[POST] %s body=%s\n", url.c_str(), json.c_str());
+  int code = http.POST(json);
+  String resp = http.getString(); http.end();
   Serial.printf("[POST] HTTP %d resp=%s\n", code, resp.c_str());
   return (code>=200 && code<300);
 }
 
+// --- known color -> close previous (if any) then open new at NOW() ---
+bool postKnown(Color c){
+  const String body = String("{\"machine_code\":\"")+MACHINE_CODE+"\",\"color\":\""+cname(c)+"\"}";
+  return httpPost(EP_NOW, body);
+}
+
+// --- unknown -> close current open interval; do NOT open new ---
+bool postUnknown(){
+  const String body = String("{\"machine_code\":\"")+MACHINE_CODE+"\",\"color\":\"unknown\"}";
+  return httpPost(EP_NOW, body);
+}
+
+// --- heartbeat (optional) -> extend end_time on the current row (same color) ---
+bool postHeartbeat(Color c){
+  const String body = String("{\"machine_code\":\"")+MACHINE_CODE+"\",\"color\":\""+cname(c)+"\"}";
+  return httpPost(EP_UPSERT, body);
+}
+
 void setup(){
   Serial.begin(115200);
-  delay(500);
-  Serial.println("\n[BOOT] ESP32 TCS34725 Poster (debug)");
-  Serial.flush();
-
-  Wire.begin(21,22); // SDA,SCL
+  delay(300);
+  Serial.println("\n[BOOT] ESP32 TCS34725 Poster (known=open, unknown=close + heartbeat)");
+  Wire.begin(21,22);
   if(!tcs.begin()){
-    Serial.println("! TCS34725 not found @0x29. Check wiring. Will keep printing heartbeat.");
-    // keep running; don't while(1)
+    Serial.println("! TCS34725 not found @0x29. Running heartbeat/HTTP only.");
   } else {
     tcs.setIntegrationTime(TCS_INTEG);
     tcs.setGain(TCS_GAIN);
@@ -120,9 +136,7 @@ void setup(){
   configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
   struct tm ti; if(getLocalTime(&ti,10000)) lastYday=ti.tm_yday;
 
-  // Print header so you always see something
   Serial.println("# ms,hue,sat,val,R,G,B,C,rf,gf,bf,color");
-  Serial.flush();
 
   // Seed initial state
   uint16_t r=0,g=0,b=0,c=0; tcs.getRawData(&r,&g,&b,&c);
@@ -131,17 +145,17 @@ void setup(){
   candidateColor = stableColor = classify(h,s,v,c);
   candidateSince = millis();
 
-  if(SEND_ON_BOOT && stableColor!=UNKNOWN) postColor(stableColor);
+  if(SEND_ON_BOOT){
+    if(stableColor==UNKNOWN) postUnknown(); else postKnown(stableColor);
+  }
 }
 
 void loop(){
   uint32_t now=millis();
 
-  // Heartbeat every 1s so Serial is never "silent"
-  if(now - lastHeartbeat >= 1000){
-    lastHeartbeat = now;
-    Serial.printf("[HB] ms=%lu wifi=%d color=%s heap=%u\n",
-      (unsigned long)now, (int)WiFi.status(), cname(stableColor), (unsigned)ESP.getFreeHeap());
+  if (millis() - lastKeep >= KEEPALIVE_MS) {
+    lastKeep = millis();
+    postColor(stableColor);   // sends {"machine_code":"CNCx","color":"green|yellow|red|unknown"}
   }
 
   // Sensor scan
@@ -153,7 +167,6 @@ void loop(){
     float h,s,v; rgb2hsv(rf,gf,bf,h,s,v);
     Color rawCol = classify(h,s,v,c);
 
-    // Print sensor line every ~500ms
     if(now - lastPrint >= 500){
       lastPrint = now;
       Serial.printf("%lu,%.1f,%.3f,%.3f,%u,%u,%u,%u,%.3f,%.3f,%.3f,%s\n",
@@ -167,17 +180,29 @@ void loop(){
     } else if((now - candidateSince) >= STABLE_MS && stableColor != candidateColor){
       stableColor = candidateColor;
       Serial.printf("[STATE] Color changed → %s\n", cname(stableColor));
-      if(stableColor != UNKNOWN) postColor(stableColor);
+      if(stableColor==UNKNOWN) postUnknown();
+      else                     postKnown(stableColor);
+
+      // reset heartbeat timer on every committed change
+      lastHeartbeat = now;
     }
   }
 
-  // New day -> re-post to start new interval
+  // Optional heartbeat while color stays the same (and is known)
+  #if HEARTBEAT_MS > 0
+  if(stableColor!=UNKNOWN && (millis() - lastHeartbeat) >= HEARTBEAT_MS){
+    lastHeartbeat = millis();
+    postHeartbeat(stableColor); // extend end_time frequently while color unchanged
+  }
+  #endif
+
+  // New day -> re-post current state (even if UNKNOWN)
   if(RESEND_AT_MIDNIGHT){
     struct tm ti; if(getLocalTime(&ti)){
       if(lastYday>=0 && ti.tm_yday!=lastYday){
         lastYday = ti.tm_yday;
         Serial.println("[STATE] Day changed → re-post current color");
-        if(stableColor!=UNKNOWN) postColor(stableColor);
+        if(stableColor==UNKNOWN) postUnknown(); else postKnown(stableColor);
       }
     }
   }

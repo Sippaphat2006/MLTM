@@ -128,7 +128,16 @@ async function fetchJSON(path, opt = {}){
 function toYMDLocal(d=new Date()){ const t=new Date(d.getTime()-d.getTimezoneOffset()*60000); return t.toISOString().slice(0,10); }
 function startOfWeekSunday(d=new Date()){ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()-x.getDay()); return x; }
 function round2(n){ return Math.round(n*100)/100; }
-function normalizeColor(c){ const s=String(c||'').toLowerCase().trim(); if(s==='amber')return'yellow'; if(s==='g')return'green'; if(s==='y')return'yellow'; if(s==='r')return'red'; return AllowedColors.includes(s)?s:'unknown'; }
+function normalizeColor(c){
+  const s = String(c||'').toLowerCase().trim();
+  if (s==='amber') return 'yellow';
+  if (s==='g') return 'green';
+  if (s==='y') return 'yellow';
+  if (s==='r') return 'red';
+  if (s==='unknown') return 'unknown';        // keep
+  return ['green','yellow','red'].includes(s) ? s : 'unknown';
+}
+
 function pad2(n){ return String(n).padStart(2,'0'); }
 function secToHMS(sec){ const s=Math.max(0,Math.floor(sec)); const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), S=s%60; return `${pad2(h)}:${pad2(m)}:${pad2(S)}`; }
 function hrsToHMS(h){ return secToHMS(Math.round(Number(h||0)*3600)); }
