@@ -12,7 +12,7 @@ const char* WIFI_PASS = "komataisen2024";
 const char* SERVER_BASE   = "http://192.168.11.186:3000/api";
 const char* EP_NOW        = "/ingest/now";     // close+open on known, close on unknown
 const char* EP_UPSERT     = "/ingest/upsert";  // heartbeat: extend end_time on same color
-const char* MACHINE_CODE  = "CNC1";
+const char* MACHINE_CODE  = "CNC3";
 const char* API_KEY       = "";   // optional: X-API-Key
 
 // --- Heartbeat: update end_time while same color persists ---
@@ -36,10 +36,6 @@ const bool RESEND_AT_MIDNIGHT = true;
 const long GMT_OFFSET_SEC = 7 * 3600;
 const int  DST_OFFSET_SEC = 0;
 const char* NTP_SERVER    = "pool.ntp.org";
-
-// keep-alive
-const uint32_t KEEPALIVE_MS = 1000;
-uint32_t lastKeep = 0;
 
 // =======================
 
@@ -152,11 +148,6 @@ void setup(){
 
 void loop(){
   uint32_t now=millis();
-
-  if (millis() - lastKeep >= KEEPALIVE_MS) {
-    lastKeep = millis();
-    postColor(stableColor);   // sends {"machine_code":"CNCx","color":"green|yellow|red|unknown"}
-  }
 
   // Sensor scan
   if(now - lastScan >= SCAN_MS){
