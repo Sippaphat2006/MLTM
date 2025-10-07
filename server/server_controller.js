@@ -355,6 +355,8 @@ const postIngestNow = async (req, res) => {
     const m = await db.query('db_mltm', `SELECT id FROM machines WHERE code=? LIMIT 1`, [machine_code]);
     if (!m.length) return res.status(404).json({ error: 'machine not found' });
     const mid = m[0].id;
+    touchMachine(mid); // <-- make watchdog know this machine is alive
+
 
     const norm = normalize3(color);
 
@@ -404,68 +406,61 @@ const postIngestNow = async (req, res) => {
 
 // POST /api/ingest/upsert
 // body: { machine_code: "CNC1", color: "green" | "yellow" | "red", ts?: "YYYY-MM-DD HH:mm:ss" }
+// POST /api/ingest/upsert
+// body: { machine_code: "CNC1", color: "green"|"yellow"|"red", ts?: ISO }
 const postUpsertStatus = async (req, res) => {
   try {
     const { machine_code, color, ts } = req.body || {};
-    if (!machine_code || !color) {
-      return res.status(400).json({ error: 'missing fields' });
-    }
+    if (!machine_code || !color) return res.status(400).json({ error: 'missing fields' });
 
     // resolve machine
-    const mrows = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=?', [machine_code]);
+    const mrows = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=? LIMIT 1', [machine_code]);
     if (!mrows.length) return res.status(404).json({ error: 'machine not found' });
     const mid = mrows[0].id;
+    touchMachine(mid); // <-- heartbeat updates lastSeen too
 
-    // resolve color
-    const crows = await db.query('db_mltm', 'SELECT id FROM status_colors WHERE name=?', [color]);
+    // resolve allowed color
+    const crows = await db.query('db_mltm', 'SELECT id FROM status_colors WHERE name=? LIMIT 1', [color]);
     if (!crows.length) return res.status(400).json({ error: 'bad color' });
     const colorId = crows[0].id;
 
-    const now = ts ? new Date(ts) : new Date();
+    // heartbeat seen
+    touchMachine(mid);
 
-    // last interval for this machine
-    const last = await db.query('db_mltm', `
-      SELECT id, color_id
-      FROM machine_status
-      WHERE machine_id=?
-      ORDER BY start_time DESC
-      LIMIT 1
+    // find currently open interval
+    const open = await db.query('db_mltm', `
+      SELECT id, color_id FROM machine_status
+      WHERE machine_id=? AND end_time IS NULL
+      ORDER BY start_time DESC LIMIT 1
     `, [mid]);
 
-    if (!last.length) {
-      // first row today/ever → open immediately
+    const now = ts ? new Date(ts) : new Date();
+
+    if (open.length) {
+      if (open[0].color_id === colorId) {
+        // same color — keep it open, no DB write needed
+        return res.json({ ok: true, action: 'heartbeat_noop' });
+      }
+      // different color (unexpected for heartbeat) — rotate rows safely
+      await db.query('db_mltm', 'UPDATE machine_status SET end_time=? WHERE id=?', [now, open[0].id]);
       await db.query('db_mltm',
-        'INSERT INTO machine_status(machine_id,color_id,start_time,end_time) VALUES (?,?,?,?)',
-        [mid, colorId, now, now]
-      );
-      return res.status(201).json({ ok: true, action: 'opened' });
+        'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
+        [mid, colorId, now]);
+      return res.status(201).json({ ok: true, action: 'rotated_on_diff_color' });
     }
 
-    if (last[0].color_id === colorId) {
-      // heartbeat (same color) → extend end_time
-      await db.query('db_mltm',
-        'UPDATE machine_status SET end_time=? WHERE id=?',
-        [now, last[0].id]
-      );
-      return res.json({ ok: true, action: 'heartbeat' });
-    }
-
-    // color changed → close last, open new at 'now'
+    // no open row (e.g., after watchdog/server restart) — open new
     await db.query('db_mltm',
-      'UPDATE machine_status SET end_time=? WHERE id=?',
-      [now, last[0].id]
-    );
-    await db.query('db_mltm',
-      'INSERT INTO machine_status(machine_id,color_id,start_time,end_time) VALUES (?,?,?,?)',
-      [mid, colorId, now, now]
-    );
+      'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
+      [mid, colorId, now]);
+    return res.status(201).json({ ok: true, action: 'opened_from_heartbeat' });
 
-    res.status(201).json({ ok: true, action: 'switched' });
   } catch (err) {
     console.error('postUpsertStatus error:', err);
-    res.status(400).json({ error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 };
+
 
 
 module.exports = {

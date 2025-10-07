@@ -16,7 +16,7 @@ const char* MACHINE_CODE  = "CNC3";
 const char* API_KEY       = "";   // optional: X-API-Key
 
 // --- Heartbeat: update end_time while same color persists ---
-#define HEARTBEAT_MS 10000  // set 0 to disable
+#define HEARTBEAT_MS 1000  // set 0 to disable
 
 // TCS34725 sensor tuning
 #define TCS_INTEG  TCS34725_INTEGRATIONTIME_50MS
