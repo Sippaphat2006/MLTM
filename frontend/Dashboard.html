@@ -30,9 +30,9 @@
     display:grid;
     grid-template-columns:320px 1fr 260px;
     gap:16px;
-    align-items:stretch;             /* stretch all three to the same row height */
+    align-items:stretch;
   }
-  @media (max-width: 1100px){ .top-grid{grid-template-columns:1fr} } /* stack on small screens */
+  @media (max-width: 1100px){ .top-grid{grid-template-columns:1fr} }
 
   .datebox label{font-weight:700;margin-right:8px}
   .datebox input[type="date"]{padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;width:100%}
@@ -103,13 +103,59 @@
 
 <script>
 /* ===== CONFIG ===== */
-const API_BASE = 'http://192.168.11.186:3000/api';   // ← set to your server
+const API_BASE = 'http://192.168.0.70:3000/api';
 const API_KEY  = '';
 const MACHINES = ['CNC1','CNC2','CNC3','CNC4'];
 let ACTIVE = MACHINES[0];
 
 /* 1s polling everywhere */
 const POLL_MS = 1000;
+
+/* ===== PERSISTENCE (URL + localStorage) ===== */
+const STORE_KEYS = { machine:'mltm.activeMachine', date:'mltm.date' };
+
+function toYMDLocal(d=new Date()){
+  const t=new Date(d.getTime()-d.getTimezoneOffset()*60000);
+  return t.toISOString().slice(0,10);
+}
+
+function readStateFromURL(){
+  const p = new URLSearchParams(location.search);
+  const m = p.get('m');
+  const d = p.get('d');
+  return { m, d };
+}
+
+function writeStateToURL(m, d){
+  const p = new URLSearchParams(location.search);
+  if (m) p.set('m', m); else p.delete('m');
+  if (d) p.set('d', d); else p.delete('d');
+  const newUrl = `${location.pathname}?${p.toString()}`;
+  history.replaceState(null, '', newUrl);
+}
+
+function loadState(){
+  // 1) URL has priority (shareable deep-link)
+  const { m, d } = readStateFromURL();
+  if (m && MACHINES.includes(m)) ACTIVE = m;
+  const today = toYMDLocal(new Date());
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) datePick.value = d; else datePick.value = (localStorage.getItem(STORE_KEYS.date) || today);
+
+  // 2) If URL had nothing for machine, use localStorage
+  if (!m) {
+    const savedM = localStorage.getItem(STORE_KEYS.machine);
+    if (savedM && MACHINES.includes(savedM)) ACTIVE = savedM;
+  }
+
+  // ensure URL reflects what we’re using now
+  writeStateToURL(ACTIVE, datePick.value);
+}
+
+function saveState(){
+  localStorage.setItem(STORE_KEYS.machine, ACTIVE);
+  localStorage.setItem(STORE_KEYS.date, datePick.value);
+  writeStateToURL(ACTIVE, datePick.value);
+}
 
 /* ===== COLORS (3 only) ===== */
 const AllowedColors = ['green','yellow','red'];
@@ -125,7 +171,6 @@ async function fetchJSON(path, opt = {}){
   if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
   return res.json();
 }
-function toYMDLocal(d=new Date()){ const t=new Date(d.getTime()-d.getTimezoneOffset()*60000); return t.toISOString().slice(0,10); }
 function startOfWeekSunday(d=new Date()){ const x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()-x.getDay()); return x; }
 function round2(n){ return Math.round(n*100)/100; }
 function normalizeColor(c){
@@ -134,10 +179,9 @@ function normalizeColor(c){
   if (s==='g') return 'green';
   if (s==='y') return 'yellow';
   if (s==='r') return 'red';
-  if (s==='unknown') return 'unknown';        // keep
+  if (s==='unknown') return 'unknown';
   return ['green','yellow','red'].includes(s) ? s : 'unknown';
 }
-
 function pad2(n){ return String(n).padStart(2,'0'); }
 function secToHMS(sec){ const s=Math.max(0,Math.floor(sec)); const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), S=s%60; return `${pad2(h)}:${pad2(m)}:${pad2(S)}`; }
 function hrsToHMS(h){ return secToHMS(Math.round(Number(h||0)*3600)); }
@@ -157,10 +201,7 @@ async function apiGetWeekly(code, weekStartYMD, opt){
   const g=[],y=[],r=[];
   for(const d of out||[]){
     let sg=0,sy=0,sr=0;
-    for(const b of d.buckets||[]){
-      const c=normalizeColor(b.color), s=Number(b.seconds||0);
-      if(c==='green') sg=s; if(c==='yellow') sy=s; if(c==='red') sr=s;
-    }
+    for(const b of d.buckets||[]){ const c=normalizeColor(b.color), s=Number(b.seconds||0); if(c==='green') sg=s; if(c==='yellow') sy=s; if(c==='red') sr=s; }
     g.push(round2(sg/3600)); y.push(round2(sy/3600)); r.push(round2(sr/3600));
   }
   return {green:g,yellow:y,red:r,labels:(out||[]).map(x=>x.date)};
@@ -168,16 +209,13 @@ async function apiGetWeekly(code, weekStartYMD, opt){
 /* New: Overview Today (all machines in 1 call) */
 async function apiGetOverviewToday(opt){
   const res = await fetchJSON('/overview/today', opt);
-  const map = {}; // code -> {currentColor, seconds, hours, name}
+  const map = {};
   for(const item of (res.overview||[])){
     const code = item?.machine?.code || item?.machine_code || '';
     if(!code) continue;
     const currentColor = normalizeColor(item?.current?.color);
     const sec = { green:0, yellow:0, red:0 };
-    for(const b of (item?.buckets||[])){
-      const c = normalizeColor(b.color);
-      if(AllowedColors.includes(c)) sec[c]+=Number(b.seconds||0);
-    }
+    for(const b of (item?.buckets||[])){ const c = normalizeColor(b.color); if(AllowedColors.includes(c)) sec[c]+=Number(b.seconds||0); }
     map[code] = {
       name: item?.machine?.name || code,
       currentColor,
@@ -199,7 +237,13 @@ function renderTabs(statusMap={}){
     const dot=document.createElement('span'); dot.className='dot';
     const col=statusMap[code]; if(col) dot.style.background=(Colors[col]||'#9e9e9e');
     btn.appendChild(dot);
-    btn.onclick=()=>{ ACTIVE=code; [...tabs.children].forEach(x=>x.classList.remove('active')); btn.classList.add('active'); manualRefreshAndRestart(); };
+    btn.onclick=()=>{
+      ACTIVE=code;
+      [...tabs.children].forEach(x=>x.classList.remove('active'));
+      btn.classList.add('active');
+      saveState();                 // <— persist selection
+      manualRefreshAndRestart();
+    };
     tabs.appendChild(btn);
   });
 }
@@ -208,7 +252,11 @@ function renderTabs(statusMap={}){
 const datePick = document.getElementById('datePick');
 const info     = document.getElementById('info');
 const errBox   = document.getElementById('err');
-datePick.addEventListener('change', manualRefreshAndRestart);
+
+datePick.addEventListener('change', ()=>{
+  saveState();                     // <— persist date
+  manualRefreshAndRestart();
+});
 
 /* ===== CHARTS ===== */
 const lineChart = new Chart(document.getElementById('lineChart').getContext('2d'),{
@@ -301,10 +349,8 @@ async function refreshAllOnce(){
     const isToday = (ymd === toYMDLocal(new Date()));
 
     if (isToday) {
-      // 1) One call for everything "today"
       const overview = await apiGetOverviewToday({ signal });
 
-      // sidebar dots
       const statusMap = {};
       MACHINES.forEach(code=>{
         const item = overview.byCode[code];
@@ -312,7 +358,6 @@ async function refreshAllOnce(){
       });
       renderTabs(statusMap);
 
-      // active machine daily + status
       const activeItem = overview.byCode[ACTIVE];
       if (activeItem) {
         pieChart.data.datasets[0].data = [activeItem.hours.green, activeItem.hours.yellow, activeItem.hours.red];
@@ -322,7 +367,6 @@ async function refreshAllOnce(){
         updateSummary(activeItem.seconds);
         setCurrentStatus(activeItem.currentColor, 'Live');
       }
-      // 2) Weekly still per-machine
       const weekly = await apiGetWeekly(ACTIVE, weekStart, { signal });
       lineChart.data.datasets[0].data=weekly.green;
       lineChart.data.datasets[1].data=weekly.yellow;
@@ -330,14 +374,12 @@ async function refreshAllOnce(){
       lineChart.update();
 
     } else {
-      // Non-today: fall back to per-machine endpoints
       const [daily, weekly, current, overview] = await Promise.all([
         apiGetDaily(ACTIVE, ymd, { signal }),
         apiGetWeekly(ACTIVE, weekStart, { signal }),
         apiGetCurrent(ACTIVE, { signal }),
-        apiGetOverviewToday({ signal }) // just to paint sidebar dots with current colors
+        apiGetOverviewToday({ signal })
       ]);
-      // dots
       const statusMap = {};
       MACHINES.forEach(code=>{
         const item = overview.byCode[code];
@@ -345,7 +387,6 @@ async function refreshAllOnce(){
       });
       renderTabs(statusMap);
 
-      // charts
       pieChart.data.datasets[0].data=[daily.hours.green,daily.hours.yellow,daily.hours.red]; pieChart.update();
       barChart.data.datasets[0].data=[daily.hours.green,daily.hours.yellow,daily.hours.red]; barChart.update();
       updateSummary(daily.seconds);
@@ -365,7 +406,7 @@ async function refreshAllOnce(){
 function startPolling(){
   stopPolling();
   tickTimer = setInterval(refreshAllOnce, POLL_MS);
-  refreshAllOnce(); // immediate
+  refreshAllOnce();
 }
 function stopPolling(){
   if(tickTimer) clearInterval(tickTimer), tickTimer=null;
@@ -375,13 +416,16 @@ function manualRefreshAndRestart(){ stopPolling(); startPolling(); }
 
 /* ===== BOOT ===== */
 (function init(){
-  renderTabs();
-  datePick.value = toYMDLocal(new Date());
+  renderTabs(); // initial placeholder
+  // Set date default first so loadState can override it properly
+  document.getElementById('datePick').value = toYMDLocal(new Date());
+  // Load machine/date from URL/localStorage, then reflect in UI + URL
+  loadState();
   info.textContent = `Machine ${ACTIVE} · ${datePick.value}`;
 })();
 (async function boot(){
   await apiGetColors(); applyThemeColors();
-  startPolling();  // 1-second live updates (overview for today)
+  startPolling();
 })();
 </script>
 </body>

@@ -4,11 +4,9 @@ user account:
 root
 castem300
 
-mtlm_api
-CUEr5xeM7bYnWgjP
-
-mtlm_dashboard
-LXJFVCVZYLsOPNQO
+mltm_account:
+mltm
+q9LKxeJZYdbNwo34
 
 
 API function control

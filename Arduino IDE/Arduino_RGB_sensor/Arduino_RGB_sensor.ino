@@ -9,10 +9,10 @@
 const char* WIFI_SSID = "ADM_CSC_IP_2.4GHz";
 const char* WIFI_PASS = "komataisen2024";
 
-const char* SERVER_BASE   = "http://192.168.11.186:3000/api";
+const char* SERVER_BASE   = "http://192.168.0.70:3000/api";
 const char* EP_NOW        = "/ingest/now";     // close+open on known, close on unknown
 const char* EP_UPSERT     = "/ingest/upsert";  // heartbeat: extend end_time on same color
-const char* MACHINE_CODE  = "CNC3";
+const char* MACHINE_CODE  = "CNC4";
 const char* API_KEY       = "";   // optional: X-API-Key
 
 // --- Heartbeat: update end_time while same color persists ---
