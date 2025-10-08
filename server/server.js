@@ -11,6 +11,10 @@ startInactivityWatchdog();
 const app = express();
 //const HOST = '192.168.0.233';
 
+const path = require('path');
+app.use('/assets', express.static(path.join(__dirname, 'public', 'assets')));
+
+
 app.use(cors());
 app.use(express.json());
 

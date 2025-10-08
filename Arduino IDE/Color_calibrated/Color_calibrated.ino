@@ -15,7 +15,7 @@ const char* WIFI_PASS = "komataisen2024";
 const char* SERVER_BASE   = "http://192.168.0.70:3000/api";
 const char* EP_NOW        = "/ingest/now";     // close+open on known, close on unknown
 const char* EP_UPSERT     = "/ingest/upsert";  // heartbeat: extend end_time on same color
-const char* MACHINE_CODE  = "CNC1";
+const char* MACHINE_CODE  = "CNC2";
 const char* API_KEY       = "";   // optional
 
 // Heartbeat (set 0 to disable)
