@@ -343,9 +343,6 @@ const postIngest = async (req, res) => {
 
 // Close previous open interval and start a new one at NOW()
 // POST /ingest/now  body: { machine_code, color }
-// POST /ingest/now   { machine_code, color }
-// POST /ingest/now  { machine_code, color }
-// POST /ingest/now  { machine_code, color }
 const postIngestNow = async (req, res) => {
   try {
     const { machine_code, color } = req.body || {};
@@ -406,8 +403,7 @@ const postIngestNow = async (req, res) => {
 
 // POST /api/ingest/upsert
 // body: { machine_code: "CNC1", color: "green" | "yellow" | "red", ts?: "YYYY-MM-DD HH:mm:ss" }
-// POST /api/ingest/upsert
-// body: { machine_code: "CNC1", color: "green"|"yellow"|"red", ts?: ISO }
+
 const postUpsertStatus = async (req, res) => {
   try {
     const { machine_code, color, ts } = req.body || {};
