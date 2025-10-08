@@ -19,6 +19,16 @@
   .tab.active{background:#1f1f1f;box-shadow:0 0 0 2px #555 inset}
   .dot{width:18px;height:18px;border-radius:50%;background:#9ca3af;margin-left:12px;flex:0 0 auto}
 
+  /* sidebar photo */
+  .photoWrap{margin-top:auto;border-top:1px solid #444;padding-top:12px}
+  .photoWrap .muted{color:#c4c7ce;font-size:12px;margin:0 0 6px 2px}
+  #sidebarPic{
+    width:100%; aspect-ratio:4/3; object-fit:cover;
+    border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,.18);
+    display:none;
+  }
+  .no-photo{display:block !important; background:#1f1f1f; color:#9aa0a6; border-radius:12px; padding:22px; text-align:center; font-size:12px}
+
   /* MAIN COLUMN */
   .main{flex:1;display:flex;flex-direction:column;gap:16px;padding:16px;overflow:auto}
   .panel{background:var(--panel);border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.06);padding:14px;height:100%}
@@ -38,13 +48,17 @@
   .datebox input[type="date"]{padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;width:100%}
 
   /* status fits blank space and scales light */
-  .status{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:180px;height:100%}
+  .status{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;min-height:180px;height:100%}
   .circle{
     width: clamp(48px, 40%, 120px);
     aspect-ratio:1/1;border-radius:50%;
     background:#9e9e9e;margin-top:10px;box-shadow:0 0 0 4px var(--ring)
   }
   .status h4{margin:0 0 6px 0}
+  #statusPic{
+    margin-top:14px; width: clamp(140px, 90%, 220px); aspect-ratio:4/3; object-fit:cover;
+    border-radius:12px; box-shadow:0 6px 16px rgba(0,0,0,.12); display:none;
+  }
 
   /* chart containers */
   .chart-panel{position:relative;height:380px}
@@ -65,6 +79,13 @@
   <aside class="sidebar">
     <div class="brand">OKUMA Dashboard</div>
     <div class="tabs" id="machineTabs"></div>
+
+    <!-- Selected machine photo (left) -->
+    <div class="photoWrap">
+      <div class="muted">Machine photo</div>
+      <img id="sidebarPic" alt="Machine photo" />
+      <div id="sidebarPicFallback" class="no-photo" style="display:none;">No photo</div>
+    </div>
   </aside>
 
   <main class="main">
@@ -84,6 +105,9 @@
         <h4>Current Status</h4>
         <div id="statusCircle" class="circle"></div>
         <div id="statusText" class="muted">Live</div>
+
+        <!-- Selected machine photo (right/status box) -->
+        <img id="statusPic" alt="Machine photo" />
       </section>
     </div>
 
@@ -105,7 +129,7 @@
 /* ===== CONFIG ===== */
 const API_BASE = 'http://192.168.0.70:3000/api';
 const API_KEY  = '';
-const MACHINES = ['OKUMA 14','OKUMA 15','OKUMA 16','OKUMA 17'];
+const MACHINES = ['OKUMA 14','OKUMA 15','OKUMA 16','OKUMA 17']; // stays as your visible labels
 let ACTIVE = MACHINES[0];
 
 /* 1s polling everywhere */
@@ -135,19 +159,14 @@ function writeStateToURL(m, d){
 }
 
 function loadState(){
-  // 1) URL has priority (shareable deep-link)
   const { m, d } = readStateFromURL();
   if (m && MACHINES.includes(m)) ACTIVE = m;
   const today = toYMDLocal(new Date());
   if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) datePick.value = d; else datePick.value = (localStorage.getItem(STORE_KEYS.date) || today);
-
-  // 2) If URL had nothing for machine, use localStorage
   if (!m) {
     const savedM = localStorage.getItem(STORE_KEYS.machine);
     if (savedM && MACHINES.includes(savedM)) ACTIVE = savedM;
   }
-
-  // ensure URL reflects what we’re using now
   writeStateToURL(ACTIVE, datePick.value);
 }
 
@@ -160,6 +179,53 @@ function saveState(){
 /* ===== COLORS (3 only) ===== */
 const AllowedColors = ['green','yellow','red'];
 let Colors = { green:'#4CAF50', yellow:'#FFC107', red:'#F44336' };
+
+/* ===== MACHINE META (code/name → picture_url) ===== */
+const MachineMetaByKey = {}; // key can be code OR name
+function rememberMeta(row){
+  const meta = {
+    id: row.id ?? row.ID,
+    code: row.code ?? row.CODE,
+    name: row.name ?? row.NAME,
+    picture_url: row.picture_url ?? row.picture ?? row.image_url ?? row.photo
+  };
+  if (meta.code) MachineMetaByKey[meta.code] = meta;
+  if (meta.name) MachineMetaByKey[meta.name] = meta;
+}
+async function apiGetMachinesMeta(){
+  try{
+    const rows=await fetchJSON('/machines');
+    (rows||[]).forEach(rememberMeta);
+  }catch(e){ /* non-fatal */ }
+}
+function candidatePictureURLs(key){
+  const m = MachineMetaByKey[key] || {};
+  const name = m.name || key;
+  const code = m.code || key;
+  const cands = [];
+  if (m.picture_url) cands.push(m.picture_url);
+  cands.push(`/assets/machines/${encodeURIComponent(name)}.jpg`);
+  cands.push(`/assets/machines/${encodeURIComponent(name)}.jpg`);
+  cands.push(`/assets/machines/${encodeURIComponent(name)}.jpg`);
+  cands.push(`/assets/machines/${encodeURIComponent(name)}.jpg`);
+  return cands;
+}
+function setImgFromCandidates(imgEl, fallbackEl, urls){
+  if (!imgEl) return;
+  let i=0;
+  function tryNext(){
+    if (i >= urls.length){ imgEl.style.display='none'; if (fallbackEl) fallbackEl.style.display='block'; return; }
+    imgEl.src = urls[i++];
+  }
+  imgEl.onload = ()=>{ imgEl.style.display='block'; if (fallbackEl) fallbackEl.style.display='none'; };
+  imgEl.onerror = tryNext;
+  tryNext();
+}
+function refreshPhotos(){
+  const urls = candidatePictureURLs(ACTIVE);
+  setImgFromCandidates(document.getElementById('sidebarPic'), document.getElementById('sidebarPicFallback'), urls);
+  setImgFromCandidates(document.getElementById('statusPic'), null, urls);
+}
 
 /* ===== HELPERS ===== */
 function withTs(path){ return path + (path.includes('?') ? '&' : '?') + `_ts=${Date.now()}`; }
@@ -206,7 +272,7 @@ async function apiGetWeekly(code, weekStartYMD, opt){
   }
   return {green:g,yellow:y,red:r,labels:(out||[]).map(x=>x.date)};
 }
-/* New: Overview Today (all machines in 1 call) */
+/* Overview Today (all machines in 1 call) */
 async function apiGetOverviewToday(opt){
   const res = await fetchJSON('/overview/today', opt);
   const map = {};
@@ -241,7 +307,8 @@ function renderTabs(statusMap={}){
       ACTIVE=code;
       [...tabs.children].forEach(x=>x.classList.remove('active'));
       btn.classList.add('active');
-      saveState();                 // <— persist selection
+      saveState();
+      refreshPhotos();             // update images immediately on tab click
       manualRefreshAndRestart();
     };
     tabs.appendChild(btn);
@@ -254,7 +321,7 @@ const info     = document.getElementById('info');
 const errBox   = document.getElementById('err');
 
 datePick.addEventListener('change', ()=>{
-  saveState();                     // <— persist date
+  saveState();
   manualRefreshAndRestart();
 });
 
@@ -348,6 +415,9 @@ async function refreshAllOnce(){
 
     const isToday = (ymd === toYMDLocal(new Date()));
 
+    // Update photos early each tick in case ACTIVE changed
+    refreshPhotos();
+
     if (isToday) {
       const overview = await apiGetOverviewToday({ signal });
 
@@ -417,14 +487,14 @@ function manualRefreshAndRestart(){ stopPolling(); startPolling(); }
 /* ===== BOOT ===== */
 (function init(){
   renderTabs(); // initial placeholder
-  // Set date default first so loadState can override it properly
   document.getElementById('datePick').value = toYMDLocal(new Date());
-  // Load machine/date from URL/localStorage, then reflect in UI + URL
   loadState();
   info.textContent = `Machine ${ACTIVE} · ${datePick.value}`;
 })();
 (async function boot(){
-  await apiGetColors(); applyThemeColors();
+  await Promise.all([apiGetMachinesMeta(), apiGetColors()]);
+  applyThemeColors();
+  refreshPhotos();
   startPolling();
 })();
 </script>
