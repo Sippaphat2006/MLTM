@@ -14,7 +14,7 @@ const _getMachineId = async (code) => {
 // --- config toggles (no .env) ---
 const UNKNOWN_STOPS_TIMER = true;      // close open interval if sensor says "unknown"
 const INACTIVITY_CLOSE_MS = 10000;      // if no ingest for this long, auto-close at last_seen
-const WATCHDOG_TICK_MS    = 2000;      // how often to check inactivity
+const WATCHDOG_TICK_MS    = 5000;      // how often to check inactivity
 const ALLOWED = ['green','yellow','red'];
 
 // normalize names coming from devices

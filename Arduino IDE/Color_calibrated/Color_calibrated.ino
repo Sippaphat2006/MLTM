@@ -19,7 +19,7 @@ const char* MACHINE_CODE  = "CNC1";
 const char* API_KEY       = "";   // optional
 
 // Heartbeat (set 0 to disable)
-#define HEARTBEAT_MS 5000
+#define HEARTBEAT_MS 10000
 
 // TCS34725
 #define TCS_INTEG  TCS34725_INTEGRATIONTIME_50MS
