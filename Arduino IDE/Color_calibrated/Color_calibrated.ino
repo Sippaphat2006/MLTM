@@ -12,14 +12,14 @@
 const char* WIFI_SSID = "ADM_CSC_IP_2.4GHz";
 const char* WIFI_PASS = "komataisen2024";
 
-const char* SERVER_BASE   = "http://192.168.0.145:3000/api";
+const char* SERVER_BASE   = "http://192.168.0.145:3001/api";
 const char* EP_NOW        = "/ingest/now";
 const char* EP_UPSERT     = "/ingest/upsert";
 const char* MACHINE_CODE  = "CNC1";
 const char* API_KEY       = "";   // optional
 
 // Heartbeat (set 0 to disable)
-#define HEARTBEAT_MS 10000
+#define HEARTBEAT_MS 15000
 
 // TCS34725
 #define TCS_INTEG  TCS34725_INTEGRATIONTIME_50MS
@@ -125,6 +125,10 @@ bool httpPost(const char* path, const String& json){
   http.begin(url);
   http.addHeader("Content-Type","application/json");
   if(strlen(API_KEY)>0) http.addHeader("X-API-Key", API_KEY);
+
+  // add this:
+  http.setTimeout(15000); // 15s read timeout to tolerate brief server hiccups
+
   Serial.printf("[POST] %s body=%s\n", url.c_str(), json.c_str());
   int code = http.POST(json);
   String resp = http.getString(); http.end();

@@ -11,10 +11,82 @@ const _getMachineId = async (code) => {
   return rows.length ? rows[0].id : null;
 };
 
+const machineCache = new Map();  // code -> id
+const colorCache   = new Map();  // name -> id
+
+async function getMachineIdCached(code){
+  const key = String(code||'').trim();
+  if (machineCache.has(key)) return machineCache.get(key);
+  const r = await db.query('db_mltm','SELECT id FROM machines WHERE code=? LIMIT 1',[key]);
+  const id = r.length ? r[0].id : null;
+  if (id) machineCache.set(key,id);
+  return id;
+}
+async function getColorIdCached(name){
+  const n = normalize3(name);
+  if (!ALLOWED.includes(n)) return null;
+  if (colorCache.has(n)) return colorCache.get(n);
+  const r = await db.query('db_mltm','SELECT id FROM status_colors WHERE name=? LIMIT 1',[n]);
+  const id = r.length ? r[0].id : null;
+  if (id) colorCache.set(n,id);
+  return id;
+}
+
+// simple in-memory job queue
+const q = [];
+let draining = false;
+async function drainQueue(){
+  if (draining) return;
+  draining = true;
+  while (q.length){
+    const job = q.shift();
+    try {
+      await upsertStatusJob(job);
+    } catch (e) {
+      console.error('[queue] upsert error:', e);
+    }
+  }
+  draining = false;
+}
+function enqueue(job){ q.push(job); setImmediate(drainQueue); }
+
+// the original DB logic, factored into a function
+async function upsertStatusJob({ machine_code, color, ts }){
+  const mid = await getMachineIdCached(machine_code);
+  if (!mid) return;                 // unknown machine (ignore)
+  touchMachine(mid);                // keep watchdog happy
+
+  const colorId = await getColorIdCached(color);
+  if (!colorId){                    // treat unknown as "close current open"
+    await closeOpenInterval('db_mltm', mid, ts ? new Date(ts) : new Date());
+    return;
+  }
+
+  const open = await db.query('db_mltm', `
+    SELECT id, color_id FROM machine_status
+    WHERE machine_id=? AND end_time IS NULL
+    ORDER BY start_time DESC LIMIT 1
+  `, [mid]);
+
+  const now = ts ? new Date(ts) : new Date();
+
+  if (open.length){
+    if (open[0].color_id === colorId) {
+      // same color → nothing to write
+      return;
+    }
+    await db.query('db_mltm','UPDATE machine_status SET end_time=? WHERE id=?',[now, open[0].id]);
+  }
+
+  await db.query('db_mltm',
+    'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
+    [mid, colorId, now]);
+}
+
 // --- config toggles (no .env) ---
 const UNKNOWN_STOPS_TIMER = true;      // close open interval if sensor says "unknown"
-const INACTIVITY_CLOSE_MS = 10000;      // if no ingest for this long, auto-close at last_seen
-const WATCHDOG_TICK_MS    = 5000;      // how often to check inactivity
+const INACTIVITY_CLOSE_MS = 45000;      // if no ingest for this long, auto-close at last_seen
+const WATCHDOG_TICK_MS    = 15000;      // how often to check inactivity
 const ALLOWED = ['green','yellow','red'];
 
 // normalize names coming from devices
@@ -43,8 +115,14 @@ async function closeOpenInterval(dbName, machineId, at=null){
 }
 
 // --- last-seen tracker (in-memory) ---
-const lastSeen = new Map();                   // machine_id -> ms since epoch
+const lastSeen = new Map();        // machine_id -> ms 
+const lastSeenCode = new Map();    // machine_code -> ms
+
 function touchMachine(mid){ lastSeen.set(mid, Date.now()); }
+function touchMachineByCode(code){
+  if (!code) return;
+  lastSeenCode.set(String(code).trim(), Date.now());
+}
 
 // exportable watchdog starter
 async function _closeIfInactive(mid, lastTs){
@@ -53,6 +131,15 @@ async function _closeIfInactive(mid, lastTs){
 }
 function startInactivityWatchdog(){
   setInterval(async ()=>{
+    for (const [code, ts] of lastSeenCode.entries()){
+      const id = machineCache.get(String(code).trim());
+      if (id){
+        const prev = lastSeen.get(id) || 0;
+        if (ts > prev) lastSeen.set(id, ts);
+        lastSeenCode.delete(code);
+      }
+    }
+
     const now = Date.now();
     for (const [mid, ts] of lastSeen.entries()){
       if (now - ts > INACTIVITY_CLOSE_MS){
@@ -343,62 +430,28 @@ const postIngest = async (req, res) => {
 
 // Close previous open interval and start a new one at NOW()
 // POST /ingest/now  body: { machine_code, color }
+// POST /ingest/now  body: { machine_code, color }
 const postIngestNow = async (req, res) => {
   try {
     const { machine_code, color } = req.body || {};
     if (!machine_code || !color) return res.status(400).json({ error: 'missing fields' });
 
-    // get machine id
-    const m = await db.query('db_mltm', `SELECT id FROM machines WHERE code=? LIMIT 1`, [machine_code]);
-    if (!m.length) return res.status(404).json({ error: 'machine not found' });
-    const mid = m[0].id;
-    touchMachine(mid); // <-- make watchdog know this machine is alive
+    // mark alive immediately so watchdog never closes while we’re queued
+    touchMachineByCode(machine_code);
 
+    // ACK instantly so the ESP32 never waits on DB
+    res.status(202).json({ ok: true, accepted: true });
 
-    const norm = normalize3(color);
+    // Do the real work in the same queue used by /upsert
+    // (unknown -> close; known -> close-if-diff + open NOW)
+    enqueue({ machine_code, color, ts: null });
 
-    // ⬇️ IMPORTANT: short-circuit unknown BEFORE any status_colors lookup
-    if (norm === 'unknown') {
-      const closed = await closeOpenInterval('db_mltm', mid, null);
-      return res.status(200).json({ ok: true, action: 'closed_on_unknown', closed });
-    }
-
-    // Any unrecognized string → also treat as unknown & close
-    if (!ALLOWED.includes(norm)) {
-      const closed = await closeOpenInterval('db_mltm', mid, null);
-      return res.status(200).json({ ok: true, action: 'closed_on_unknown_alias', closed, raw: color });
-    }
-
-    // look up allowed color id
-    const cRows = await db.query('db_mltm', `SELECT id FROM status_colors WHERE name=? LIMIT 1`, [norm]);
-    if (!cRows.length) return res.status(500).json({ error: `status_colors missing for ${norm}` });
-    const colorId = cRows[0].id;
-
-    // same color already open → noop
-    const cur = await db.query('db_mltm',
-      `SELECT id, color_id
-         FROM machine_status
-        WHERE machine_id=? AND end_time IS NULL
-        ORDER BY start_time DESC LIMIT 1`, [mid]);
-
-    if (cur.length && cur[0].color_id === colorId) {
-      return res.status(200).json({ ok: true, action: 'noop_same_color' });
-    }
-
-    // close previous open (if any) then open new interval
-    if (cur.length) await closeOpenInterval('db_mltm', mid, null);
-
-    await db.query('db_mltm',
-      `INSERT INTO machine_status (machine_id, color_id, start_time, end_time)
-       VALUES (?, ?, NOW(), NULL)`,
-      [mid, colorId]);
-
-    return res.status(201).json({ ok: true, action: 'opened', color: norm });
   } catch (err) {
     console.error('postIngestNow error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    if (!res.headersSent) return res.status(202).json({ ok:true, accepted:true, note:'soft-error' });
   }
 };
+
 
 
 // POST /api/ingest/upsert
@@ -409,53 +462,24 @@ const postUpsertStatus = async (req, res) => {
     const { machine_code, color, ts } = req.body || {};
     if (!machine_code || !color) return res.status(400).json({ error: 'missing fields' });
 
-    // resolve machine
-    const mrows = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=? LIMIT 1', [machine_code]);
-    if (!mrows.length) return res.status(404).json({ error: 'machine not found' });
-    const mid = mrows[0].id;
-    touchMachine(mid); // <-- heartbeat updates lastSeen too
+    // NEW: mark alive immediately (no I/O)
+    touchMachineByCode(machine_code);
 
-    // resolve allowed color
-    const crows = await db.query('db_mltm', 'SELECT id FROM status_colors WHERE name=? LIMIT 1', [color]);
-    if (!crows.length) return res.status(400).json({ error: 'bad color' });
-    const colorId = crows[0].id;
+    // ACK immediately
+    res.status(202).json({ ok:true, accepted:true });
 
-    // heartbeat seen
-    touchMachine(mid);
+    // Optional: try to resolve id & touch by id (don’t await)
+    getMachineIdCached(machine_code).then(mid => { if (mid) touchMachine(mid); }).catch(()=>{});
 
-    // find currently open interval
-    const open = await db.query('db_mltm', `
-      SELECT id, color_id FROM machine_status
-      WHERE machine_id=? AND end_time IS NULL
-      ORDER BY start_time DESC LIMIT 1
-    `, [mid]);
-
-    const now = ts ? new Date(ts) : new Date();
-
-    if (open.length) {
-      if (open[0].color_id === colorId) {
-        // same color — keep it open, no DB write needed
-        return res.json({ ok: true, action: 'heartbeat_noop' });
-      }
-      // different color (unexpected for heartbeat) — rotate rows safely
-      await db.query('db_mltm', 'UPDATE machine_status SET end_time=? WHERE id=?', [now, open[0].id]);
-      await db.query('db_mltm',
-        'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
-        [mid, colorId, now]);
-      return res.status(201).json({ ok: true, action: 'rotated_on_diff_color' });
-    }
-
-    // no open row (e.g., after watchdog/server restart) — open new
-    await db.query('db_mltm',
-      'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
-      [mid, colorId, now]);
-    return res.status(201).json({ ok: true, action: 'opened_from_heartbeat' });
+    // Continue work in background
+    enqueue({ machine_code, color, ts });
 
   } catch (err) {
     console.error('postUpsertStatus error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    if (!res.headersSent) return res.status(202).json({ ok:true, accepted:true, note:'soft-error' });
   }
 };
+
 
 
 
