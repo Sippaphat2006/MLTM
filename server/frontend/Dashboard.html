@@ -213,7 +213,7 @@
 
 <script>
 /********************** CONFIG **********************/
-const API_BASE = 'http://192.168.0.124:3001/api';
+const API_BASE = 'http://192.168.0.233:3002/api';
 const API_KEY  = '';
 const SERVER_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
@@ -223,6 +223,9 @@ const LABEL  = { green:'Active',  yellow:'Setup',   red:'Alarm' };
 const STEP_REFRESH_MS = 1000;
 const DAY_START = { hh:7, mm:30 };
 
+const LIVE_MS = 2000; // how often the dashboard auto-refreshes global stuff
+
+
 // Panel 4 - touch status (5 states)
 const TOUCH = {
   1: { key:'RUN',       color:'#16a34a' }, // green-600
@@ -231,6 +234,10 @@ const TOUCH = {
   4: { key:'WAIT TECH', color:'#8b5cf6' }, // violet-500
   5: { key:'WAIT OP',   color:'#f43f5e' }, // rose-500
 };
+
+// === Timeline noise & merge rules (Panel 3) ===
+const P3_NOISE_MS = 2000;
+const P3_MERGE_GAP_MS = Infinity;
 
 
 /********************** STATE **********************/
@@ -351,6 +358,40 @@ function fmtDurHMS(sec){
   const ss = s % 60;
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
 }
+
+function cleanMergeTimeline(rows, ymd, noiseMs = P3_NOISE_MS, mergeGapMs = P3_MERGE_GAP_MS){
+  const { start, end } = rangeOf(ymd);
+  const now = Date.now();
+
+  // clip ให้อยู่ในหน้าต่าง 07:30 → 07:30 และคำนวณเป็น ms
+  let segs = (rows||[]).map(r => {
+    const c = (r.color||'').toLowerCase();
+    let a = parseLocal(r.start_time).getTime();
+    let b = r.end_time ? parseLocal(r.end_time).getTime() : Math.min(now, end);
+    if (b <= start || a >= end) return null;
+    a = Math.max(a, start); b = Math.min(b, end);
+    return { c, a, b };
+  }).filter(Boolean);
+
+  // ตัดช่วงสั้น (noise)
+  segs = segs.filter(s => (s.b - s.a) > noiseMs);
+
+  // เรียงเวลา
+  segs.sort((p,q)=> (p.a - q.a) || (p.b - q.b));
+
+  // รวมช่วงสีเดียวกันถ้าติดกัน (หรือมีกลางว่างไม่เกิน mergeGapMs)
+  const out = [];
+  for (const s of segs){
+    const last = out[out.length - 1];
+    if (last && last.c === s.c && (s.a - last.b) <= mergeGapMs){
+      last.b = Math.max(last.b, s.b);
+    } else {
+      out.push({...s});
+    }
+  }
+  return out; // [{c,startMs,endMs}, ...]
+}
+
 
 
 /********************** API WRAPPERS **********************/
@@ -501,17 +542,22 @@ function buildSegments(timeline, ymd){
 async function drawP3Once(){
   const ymd = el('p3Date').value;
 
-  // same window logic: 07:30 → next-day 07:30, with next-day slice merged
+  // ดึงวันหลัก + ช่วงของวันถัดไป (ตัดไว้ถึง 07:30)
   const tl = await apiTimelineSpan(ACTIVE, ymd);
-  const {start,end,midnight} = rangeOf(ymd);
+  const { start, end, midnight } = rangeOf(ymd);
 
-  // reuse buildSegments but drop grey fillers to show only real states
-  const raw = buildSegments(tl, ymd).filter(s => s.color !== COLORS.grey);
+  // ทำความสะอาด + รวมช่วง
+  const merged = cleanMergeTimeline(tl, ymd);
 
-  // index each continuous segment (1..N) for the X axis
-  const candles = raw.map((s, i) => ({ idx:i+1, start:s.start, end:s.end, color:s.color }));
+  // สร้างข้อมูลให้ปลั๊กอินวาดแท่ง
+  const candles = merged.map((s, i) => ({
+    idx: i + 1,
+    start: s.a,
+    end:   s.b,
+    color: COLORS[s.c] || COLORS.grey
+  }));
 
-  // apply new axes and data
+  // อัปเดตสเกล/ข้อมูล
   p3Chart.options.scales.y.min = start;
   p3Chart.options.scales.y.max = end;
   p3Chart.options.scales.x.max = candles.length + 1;
@@ -519,6 +565,7 @@ async function drawP3Once(){
   p3Chart.$candles = candles;
   p3Chart.update();
 }
+
 
 
 function startP3Auto(){
@@ -571,6 +618,63 @@ function startP4Auto(){
   if (now>=start && now<=end) p4Timer = setInterval(drawP4Once, STEP_REFRESH_MS);
 }
 function stopP4Auto(){ if (p4Timer) clearInterval(p4Timer), p4Timer=null; }
+
+
+
+/********************** LIVE REFRESH **********************/
+let liveTimer = null;
+
+function startLiveLoops(){
+  stopLiveLoops();
+  // keep the interval charts running
+  startP3Auto();
+  startP4Auto();
+
+  liveTimer = setInterval(async ()=>{
+    try {
+      // 1) refresh sidebar dots (current state for ALL machines)
+      const o = await apiOverviewToday();
+      const statusMap = {};
+      (o.overview || []).forEach(item => {
+        const code = item?.machine?.code || item?.CODE;
+        const col  = (item?.current?.color || 'unknown').toLowerCase();
+        if (code) statusMap[code] = col;
+      });
+      renderTabs(statusMap); // preserves ACTIVE
+    } catch (_) {}
+
+    // 2) refresh Panel 1 while we're in the current day window
+    const ymd = mainDate.value;
+    const { start, end } = rangeOf(ymd);
+    const now = Date.now();
+    if (now >= start && now <= end) {
+      drawP1();
+    }
+
+    // 3) auto-roll the main date at the end of window (next 07:30)
+    if (now > end) {
+      const nd = toYMDLocal(new Date());
+      if (mainDate.value !== nd) {
+        mainDate.value = nd;
+        el('p1Date').value = nd;
+        el('p3Date').value = nd;
+        el('p4Date').value = nd;
+        el('p2Month').value = ymOf(nd);
+        updateMainHero();
+        contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${nd}`;
+
+        // redraw everything for the new day
+        await drawP1();
+        await drawP2();
+        startP3Auto();
+        startP4Auto();
+      }
+    }
+  }, LIVE_MS);
+}
+
+function stopLiveLoops(){ if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
 
 // base chart for P4
 p4Chart = new Chart(el('p4Chart').getContext('2d'),{
@@ -781,7 +885,7 @@ function wireP2StatusButtons(){
   contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${mainDate.value}`;
   globalErr.textContent='';
 
-  await drawP1(); await drawP2(); startP3Auto(); startP4Auto();
+  await drawP1(); await drawP2(); startLiveLoops();
 
   mainDate.addEventListener('change', ()=>{
     const ymd = mainDate.value;
@@ -805,7 +909,7 @@ async function refreshAll(){
   try{
     updatePreview();
     contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${mainDate.value}`;
-    await drawP1(); await drawP2(); startP3Auto(); startP4Auto();
+    await drawP1(); await drawP2(); startLiveLoops();
   }catch(e){ globalErr.textContent = e.message||String(e); }
 }
 </script>

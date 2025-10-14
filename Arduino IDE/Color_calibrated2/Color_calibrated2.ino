@@ -1,6 +1,7 @@
-// esp32_tcs34725_poster_debug.ino  (recalibrated RED; GREEN/YELLOW unchanged; robust ranges)
-// - Board LED is OFF
-// - Uses g/r and b/r; RED also checks r fraction (r/(r+g+b))
+// esp32_tcs34725_poster_debug.ino  (dual-band YELLOW + calibrated RED; GREEN unchanged)
+// - Uses g/r, b/r and rfrac (r/(r+g+b))
+// - Bands: GREEN, YELLOW₁ (high-ratio), YELLOW₂ (amber-ish), RED
+// - Unknown only when too dark or off-band (then fallback to nearest centroid)
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -15,7 +16,7 @@ const char* WIFI_PASS = "komataisen2024";
 const char* SERVER_BASE   = "http://192.168.0.124:3001/api";
 const char* EP_NOW        = "/ingest/now";
 const char* EP_UPSERT     = "/ingest/upsert";
-const char* MACHINE_CODE  = "CNC1";
+const char* MACHINE_CODE  = "CNC4";
 const char* API_KEY       = "";   // optional
 
 // Heartbeat (set 0 to disable)
@@ -29,27 +30,30 @@ const char* API_KEY       = "";   // optional
 // Brightness guard
 const uint16_t CLEAR_MIN = 200;
 
-// GREEN band (from your green lines: gr≈0.881–0.883, br≈0.893–0.896)
-const float GR_GREEN_MIN = 0.875f;   // g/r >= 0.875
-const float BR_GREEN_MIN = 0.890f;   // b/r >= 0.890
+// GREEN (your stable green cluster: g/r≈0.882, b/r≈0.895, rfrac≈0.36)
+const float GR_GREEN_MIN = 0.875f;
+const float BR_GREEN_MIN = 0.890f;
 
-// YELLOW band (from your yellow lines: gr≈0.795–0.797, br≈0.811–0.812)
-// Make it a *range* so tiny ratios (true red) don't match yellow.
-const float GR_YEL_MIN   = 0.760f;
-const float GR_YEL_MAX   = 0.860f;
-const float BR_YEL_MIN   = 0.800f;
-const float BR_YEL_MAX   = 0.870f;
+// YELLOW₁ (original “whitish yellow”: g/r≈0.796, b/r≈0.812, rfrac≈0.38)
+const float GR_Y1_MIN = 0.760f, GR_Y1_MAX = 0.860f;
+const float BR_Y1_MIN = 0.800f, BR_Y1_MAX = 0.870f;
 
-// RED band (from your new red lines: gr≈0.105–0.110, br≈0.146–0.150, rfrac≈0.79)
-// Give margin for lighting drift but keep it tight enough to avoid yellow.
-const float GR_RED_MAX   = 0.200f;   // g/r <= 0.20
-const float BR_RED_MAX   = 0.300f;   // b/r <= 0.30
-const float RFRAC_RED_MIN= 0.650f;   // r/(r+g+b) >= 0.65
+// YELLOW₂ (new “amber” yellow: g/r≈0.414, b/r≈0.186, rfrac≈0.625)
+const float GR_Y2_MIN = 0.330f, GR_Y2_MAX = 0.550f;
+const float BR_Y2_MIN = 0.160f, BR_Y2_MAX = 0.300f;
+const float RF_Y2_MIN = 0.550f, RF_Y2_MAX = 0.720f;
 
-// Centroids (fallback when between bands)
-const float GR_C_GREEN = 0.882f, BR_C_GREEN = 0.895f;
-const float GR_C_YEL   = 0.796f, BR_C_YEL   = 0.812f;
-const float GR_C_RED   = 0.108f, BR_C_RED   = 0.149f;
+// RED (deep red you captured: g/r≈0.108, b/r≈0.149, rfrac≈0.79)
+const float GR_RED_MAX    = 0.200f;  // g/r <= 0.20
+const float BR_RED_MAX    = 0.300f;  // b/r <= 0.30
+const float RFRAC_RED_MIN = 0.650f;  // rfrac >= 0.65
+
+// Fallback centroids (also use rfrac lightly)
+const float GR_C_GREEN=0.882f, BR_C_GREEN=0.895f, RF_C_GREEN=0.360f;
+const float GR_C_Y1  =0.796f, BR_C_Y1  =0.812f, RF_C_Y1  =0.380f;
+const float GR_C_Y2  =0.414f, BR_C_Y2  =0.186f, RF_C_Y2  =0.625f;
+const float GR_C_RED =0.108f, BR_C_RED =0.149f, RF_C_RED =0.790f;
+const float W_RFRAC  = 0.25f;  // weight for rfrac in fallback distance
 // ---------------------------------
 
 // Timing
@@ -74,7 +78,7 @@ static inline const char* cname(Color c){
 
 static inline float sqr(float x){ return x*x; }
 
-// Classify with explicit bands. Order matters: RED first (to keep small ratios out of YELLOW).
+// Classify with explicit bands. Order matters: RED → GREEN → Y1 → Y2 → fallback.
 static Color classify_rgb(uint16_t r,uint16_t g,uint16_t b,uint16_t C,
                           float& gr_out, float& br_out, float& rfrac_out){
   if (C < CLEAR_MIN || r == 0) { gr_out = br_out = rfrac_out = 0.0f; return UNKNOWN; }
@@ -92,17 +96,26 @@ static Color classify_rgb(uint16_t r,uint16_t g,uint16_t b,uint16_t C,
   // --- GREEN ---
   if (gr >= GR_GREEN_MIN && br >= BR_GREEN_MIN) return GREEN;
 
-  // --- YELLOW ---
-  if (gr >= GR_YEL_MIN && gr <= GR_YEL_MAX &&
-      br >= BR_YEL_MIN && br <= BR_YEL_MAX) return YELLOW;
+  // --- YELLOW₁ (high ratios) ---
+  if (gr >= GR_Y1_MIN && gr <= GR_Y1_MAX &&
+      br >= BR_Y1_MIN && br <= BR_Y1_MAX) return YELLOW;
 
-  // Fallback: nearest centroid (keeps stability near boundaries)
-  const float dG = sqr(gr - GR_C_GREEN) + sqr(br - BR_C_GREEN);
-  const float dY = sqr(gr - GR_C_YEL)   + sqr(br - BR_C_YEL);
-  const float dR = sqr(gr - GR_C_RED)   + sqr(br - BR_C_RED);
-  if (dG <= dY && dG <= dR) return GREEN;
-  if (dY <= dG && dY <= dR) return YELLOW;
-  return RED;
+  // --- YELLOW₂ (amber ratios + rfrac window) ---
+  if (gr >= GR_Y2_MIN && gr <= GR_Y2_MAX &&
+      br >= BR_Y2_MIN && br <= BR_Y2_MAX &&
+      rfrac >= RF_Y2_MIN && rfrac <= RF_Y2_MAX) return YELLOW;
+
+  // --- Fallback: nearest centroid in (gr, br, rfrac) ---
+  const float dG = sqr(gr - GR_C_GREEN) + sqr(br - BR_C_GREEN) + W_RFRAC*sqr(rfrac - RF_C_GREEN);
+  const float dY1= sqr(gr - GR_C_Y1  ) + sqr(br - BR_C_Y1  ) + W_RFRAC*sqr(rfrac - RF_C_Y1);
+  const float dY2= sqr(gr - GR_C_Y2  ) + sqr(br - BR_C_Y2  ) + W_RFRAC*sqr(rfrac - RF_C_Y2);
+  const float dR = sqr(gr - GR_C_RED ) + sqr(br - BR_C_RED ) + W_RFRAC*sqr(rfrac - RF_C_RED);
+
+  float best=dG; Color out=GREEN;
+  if (dY1 < best) { best=dY1; out=YELLOW; }
+  if (dY2 < best) { best=dY2; out=YELLOW; }
+  if (dR  < best) { best=dR;  out=RED;    }
+  return out;
 }
 
 Color stableColor=UNKNOWN, candidateColor=UNKNOWN;
@@ -132,7 +145,7 @@ bool httpPost(const char* path, const String& json){
   http.begin(url);
   http.addHeader("Content-Type","application/json");
   if(strlen(API_KEY)>0) http.addHeader("X-API-Key", API_KEY);
-  http.setTimeout(15000); // tolerate brief hiccups
+  http.setTimeout(15000);
 
   Serial.printf("[POST] %s body=%s\n", url.c_str(), json.c_str());
   int code = http.POST(json);
@@ -157,7 +170,7 @@ bool postHeartbeat(Color c){
 void setup(){
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n[BOOT] ESP32 TCS34725 Poster (RED recalibrated; robust ranges)");
+  Serial.println("\n[BOOT] ESP32 TCS34725 Poster (dual-band yellow + calibrated red)");
   Wire.begin(21,22);
   if(!tcs.begin()){
     Serial.println("! TCS34725 not found @0x29. Running heartbeat/HTTP only.");
