@@ -15,7 +15,7 @@ const app = express();
 app.use(cors());
 app.use('/api', express.json({ limit: '4kb' }));
 
-app.get('/', (req, res) => res.send('MLTM server is up'));
+app.get('/health', (req, res) => res.send('MLTM server is up'));
 app.use('/api', serverRouter);
 
 app.use('/api', (err, req, res, next) => {
@@ -46,4 +46,4 @@ const srv = app.listen(PORT, () => console.log(`Server running on port ${PORT}`)
 // keep these conservative so hung clients don’t tie up sockets
 srv.requestTimeout   = 20000; // 20s
 srv.headersTimeout   = 17000; // 17s
-srv.keepAliveTimeout = 5000;  // 5s
+srv.keepAliveTimeout = 5000;  // 5ss

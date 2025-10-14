@@ -186,20 +186,34 @@
         <div class="muted">Time axis pinned: 07:30 → next-day 07:30 (local).</div>
       </section>
 
-      <!-- Panel 4: Placeholder (Setup vs Run by month) -->
+      <!-- Panel 4: Worker-reported status over time (5 states) -->
       <section class="panel">
         <div class="panel-header">
-          <div class="title">Monthly summary (placeholder)</div>
-          <div class="picker"><input type="month" id="p4Month"/></div>
+          <div class="title">Worker-reported status over time</div>
+          <div class="picker"><input type="date" id="p4Date"/></div>
         </div>
-        <div class="chart-wrap sm"><canvas id="p4Chart"></canvas></div>
+
+        <div class="legend-row">
+          <div class="legend-chip"><span class="chip" style="background:#16a34a"></span><span class="muted">RUN</span></div>
+          <div class="legend-chip"><span class="chip" style="background:#f59e0b"></span><span class="muted">SETUP</span></div>
+          <div class="legend-chip"><span class="chip" style="background:#0ea5e9"></span><span class="muted">WAIT MAT</span></div>
+          <div class="legend-chip"><span class="chip" style="background:#8b5cf6"></span><span class="muted">WAIT TECH</span></div>
+          <div class="legend-chip"><span class="chip" style="background:#f43f5e"></span><span class="muted">WAIT OP</span></div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="p4Chart"></canvas>
+          <div id="p4Tip" class="tip hidden"></div>
+        </div>
+        <div class="muted">Same time window: 07:30 → next-day 07:30 (local).</div>
       </section>
+
     </section>
   </main>
 
 <script>
 /********************** CONFIG **********************/
-const API_BASE = 'http://192.168.0.124:3001/api';
+const API_BASE = window.location.origin.replace(/\/$/, '') + '/api';
 const API_KEY  = '';
 const SERVER_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
@@ -208,6 +222,16 @@ const LABEL  = { green:'Active',  yellow:'Setup',   red:'Alarm' };
 
 const STEP_REFRESH_MS = 1000;
 const DAY_START = { hh:7, mm:30 };
+
+// Panel 4 - touch status (5 states)
+const TOUCH = {
+  1: { key:'RUN',       color:'#16a34a' }, // green-600
+  2: { key:'SETUP',     color:'#f59e0b' }, // amber-500
+  3: { key:'WAIT MAT',  color:'#0ea5e9' }, // sky-500
+  4: { key:'WAIT TECH', color:'#8b5cf6' }, // violet-500
+  5: { key:'WAIT OP',   color:'#f43f5e' }, // rose-500
+};
+
 
 /********************** STATE **********************/
 let MACHINES = [], MACHINE_META = {}, ACTIVE = null;
@@ -353,6 +377,25 @@ async function apiTimeline(code, ymd){
   return await fetchJSON(`/machines/${encodeURIComponent(code)}/timeline?date=${encodeURIComponent(ymd)}`);
 }
 
+async function apiTouchTimeline(code, ymd){
+  return await fetchJSON(`/machines/${encodeURIComponent(code)}/touch/timeline?date=${encodeURIComponent(ymd)}`);
+}
+async function apiTouchTimelineSpan(code, ymd, minsAfterMidnight = DAY_START.hh*60 + DAY_START.mm){
+  const nd = nextYMD(ymd);
+  const [today, next] = await Promise.all([
+    apiTouchTimeline(code, ymd),
+    apiTouchTimeline(code, nd)
+  ]);
+  const nextMid = parseLocal(nd + 'T00:00:00');
+  const cutoff  = new Date(nextMid.getTime() + minsAfterMidnight*60000);
+  const nextSlice = (next||[]).filter(r => {
+    const s = parseLocal(r.start_time);
+    return s >= nextMid && s < cutoff;
+  });
+  return [...(today||[]), ...nextSlice];
+}
+
+
 /********************** TABS **********************/
 function renderTabs(statusByCode={}){
   tabsEl.innerHTML='';
@@ -488,7 +531,86 @@ function startP3Auto(){
 function stopP3Auto(){ if (p3Timer) clearInterval(p3Timer), p3Timer=null; }
 
 /********************** PANEL 4 – placeholder **********************/
-let p4Chart; function drawP4(){ p4Chart.update(); }
+let p4Chart, p4Timer=null;
+
+function buildTouchCandles(rows, ymd){
+  const {start, end} = rangeOf(ymd);
+  const now = Date.now();
+  const segs=[];
+  (rows||[]).forEach(r=>{
+    let a = parseLocal(r.start_time).getTime();
+    let b = r.end_time ? parseLocal(r.end_time).getTime() : Math.min(now, end);
+    if (b<=start || a>=end) return;
+    a=Math.max(a,start); b=Math.min(b,end);
+    const color = (TOUCH[r.status_id]?.color) || '#9ca3af';
+    segs.push({ start:a, end:b, color, emp_id:r.emp_id });
+  });
+  segs.sort((p,q)=>p.start-q.start);
+  return segs.map((s,i)=>({ idx:i+1, start:s.start, end:s.end, color:s.color, emp_id:s.emp_id }));
+}
+
+async function drawP4Once(){
+  const ymd = el('p4Date').value;
+  const tl  = await apiTouchTimelineSpan(ACTIVE, ymd);
+  const {start,end,midnight} = rangeOf(ymd);
+  const candles = buildTouchCandles(tl, ymd);
+
+  p4Chart.options.scales.y.min = start;
+  p4Chart.options.scales.y.max = end;
+  p4Chart.options.scales.x.max = candles.length + 1;
+  p4Chart.options.plugins.candlesPlugin.midnight = midnight;
+  p4Chart.$candles = candles;
+  p4Chart.update();
+}
+
+function startP4Auto(){
+  stopP4Auto();
+  const {start,end} = rangeOf(el('p4Date').value);
+  drawP4Once();
+  const now = Date.now();
+  if (now>=start && now<=end) p4Timer = setInterval(drawP4Once, STEP_REFRESH_MS);
+}
+function stopP4Auto(){ if (p4Timer) clearInterval(p4Timer), p4Timer=null; }
+
+// base chart for P4
+p4Chart = new Chart(el('p4Chart').getContext('2d'),{
+  type:'scatter',
+  data:{ datasets:[{ data:[] }] },
+  options:{ responsive:true, maintainAspectRatio:false, parsing:false,
+    scales:{
+      y:{ type:'time', time:{ unit:'hour', displayFormats:{ hour:'HH:mm' } } },
+      x:{ type:'linear', min:0, ticks:{ stepSize:1, precision:0 } }
+    },
+    plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null } }
+  }
+});
+
+// hover tooltip (interval + emp_id)
+(function attachP4Hover(){
+  const tip = el('p4Tip'), c = p4Chart.canvas;
+  function hide(){ tip.classList.add('hidden'); }
+  function show(x, y, text){ tip.textContent=text; tip.style.left=(x+12)+'px'; tip.style.top=(y+12)+'px'; tip.classList.remove('hidden'); }
+  c.addEventListener('mouseleave', hide);
+  c.addEventListener('mousemove', (ev)=>{
+    const rect = c.getBoundingClientRect();
+    const xpx  = ev.clientX - rect.left;
+    const ypx  = ev.clientY - rect.top;
+    const { chartArea:{top,bottom,left,right}, scales:{x,y} } = p4Chart;
+    if (xpx < left || xpx > right || ypx < top || ypx > bottom) return hide();
+    const bars = p4Chart.$candles || [];
+    if (!bars.length) return hide();
+    const colW = Math.max(8, ((right - left) / Math.max(1, bars.length + 2)) * 0.6);
+    let hit=null;
+    for (const b of bars){
+      const cx=x.getPixelForValue(b.idx), y1=y.getPixelForValue(b.start), y2=y.getPixelForValue(b.end);
+      const ya=Math.min(y1,y2), yb=Math.max(y1,y2);
+      if (xpx>=cx-colW/2 && xpx<=cx+colW/2 && ypx>=ya && ypx<=yb) { hit=b; break; }
+    }
+    if (!hit) return hide();
+    show(xpx, ypx, `${fmtHMS(hit.start)} → ${fmtHMS(hit.end)}  •  emp ${hit.emp_id}`);
+  });
+})();
+
 
 /********************** BOOTSTRAP **********************/
 function wireP2StatusButtons(){
@@ -506,6 +628,8 @@ function wireP2StatusButtons(){
     el('p2Title').textContent = `Monthly runtime overview (${STATUS_LABEL[P2_STATUS]})`;
     el('p2LegendText').textContent = `${STATUS_LABEL[P2_STATUS]} time per day`;
     el('p2LegendChip').style.background = COLORS[P2_STATUS];
+    el('p4Date').value = toYMDLocal(new Date());
+
 
     if (p2Chart) {
       p2Chart.data.datasets[0].label = `${STATUS_LABEL[P2_STATUS]} time per day`;
@@ -523,7 +647,8 @@ function wireP2StatusButtons(){
   el('p1Date').value = today;
   el('p3Date').value = today;
   el('p2Month').value = ymOf(today);
-  el('p4Month').value = ymOf(today);
+  el('p4Date').value = today;
+
 
   p1Chart = new Chart(el('p1Chart').getContext('2d'),{
     type:'bar',
@@ -646,13 +771,7 @@ function wireP2StatusButtons(){
       show(xpx, ypx, `${fmtHMS(hit.start)} → ${fmtHMS(hit.end)}`);
     });
   })();
-
-
-  p4Chart = new Chart(el('p4Chart').getContext('2d'),{
-    type:'bar',
-    data:{ labels:['Setup','Run'], datasets:[{ data:[0,0], backgroundColor:[COLORS.yellow, COLORS.green] }] },
-    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false }, title:{ display:true, text:'Coming soon'} }, scales:{ y:{ beginAtZero:true, max:24, ticks:{ stepSize:2 }, title:{ display:true, text:'Hours'} } } }
-  });
+  
 
   await apiMachines();
   const o = await apiOverviewToday();
@@ -662,12 +781,13 @@ function wireP2StatusButtons(){
   contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${mainDate.value}`;
   globalErr.textContent='';
 
-  await drawP1(); await drawP2(); startP3Auto(); drawP4();
+  await drawP1(); await drawP2(); startP3Auto(); startP4Auto();
 
   mainDate.addEventListener('change', ()=>{
     const ymd = mainDate.value;
-    el('p1Date').value = ymd; el('p3Date').value = ymd;
-    const ym = ymOf(ymd); el('p2Month').value = ym; el('p4Month').value = ym;
+    el('p1Date').value = ymd; el('p3Date').value = ymd; el('p4Date').value = ymd;
+    const ym = ymOf(ymd); 
+    el('p2Month').value = ym; 
     contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${ymd}`;
     refreshAll();
     updateMainHero();
@@ -675,7 +795,8 @@ function wireP2StatusButtons(){
   el('p1Date').addEventListener('change', ()=> drawP1());
   el('p2Month').addEventListener('change', ()=> drawP2());
   el('p3Date').addEventListener('change', ()=> startP3Auto());
-  el('p4Month').addEventListener('change', ()=> drawP4());
+  el('p4Date').addEventListener('change', ()=> startP4Auto());
+
 })();
 
 
@@ -684,7 +805,8 @@ async function refreshAll(){
   try{
     updatePreview();
     contextInfo.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE} · ${mainDate.value}`;
-    await drawP1(); await drawP2(); startP3Auto(); drawP4();
+    await drawP1(); await drawP2(); startP3Auto(); startP4Auto();
   }catch(e){ globalErr.textContent = e.message||String(e); }
 }
 </script>
+
