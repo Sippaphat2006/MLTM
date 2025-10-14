@@ -16,6 +16,8 @@ router.get('/machines/:code/status/current', ctrl.getMachineCurrentStatus);
 router.get('/machines/:code/status/by-date', ctrl.getMachineByDate);
 router.get('/machines/:code/timeline', ctrl.getMachineTimeline);
 router.get('/machines/:code/status/weekly', ctrl.getMachineWeekly);
+router.get('/machines/:code/touch/timeline', ctrl.getTouchTimeline);
+
 
 // Overview
 router.get('/overview/today', ctrl.getOverviewToday);

@@ -12,7 +12,17 @@ const databases = {
     //port: 8081,
     queueLimit: 0
   }).promise(),
-  
+
+  db_esp32: mysql.createPool({
+    host: '192.168.0.233',
+    user: 'root',
+    password: 'castem300',
+    database: 'esp32',
+    waitForConnections: true,
+    connectionLimit: 10,
+    //port: 8081,
+    queueLimit: 0
+  }).promise(),
 };
 
 // ฟังก์ชัน Query แบบเลือก Database

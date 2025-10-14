@@ -149,12 +149,18 @@ function startInactivityWatchdog(){
     }
   }, WATCHDOG_TICK_MS);
   (async function closeStaleOnBoot(){
-    await db.query('db_mltm', `
-      UPDATE machine_status
-      SET end_time = NOW()
-      WHERE end_time IS NULL
-        AND start_time < DATE_SUB(NOW(), INTERVAL 5 MINUTE)
-    `);
+    try {
+      await db.query('db_mltm', `
+        UPDATE machine_status
+        SET end_time = NOW()
+        WHERE end_time IS NULL
+          AND start_time < DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+      `);
+    } catch (err) {
+      console.warn('[watchdog] closeStaleOnBoot skipped:', err.code || err.message);
+      // Optional: retry once in 10s if MySQL starts a bit late
+      setTimeout(closeStaleOnBoot, 10000);
+    }
   })();
 }
 
@@ -189,7 +195,6 @@ const getMachines = (req, res) => {
 };
 
 // ---------- 1) Per-machine status ----------
-// GET /machines/:code/status/current
 // GET /machines/:code/status/current
 const getMachineCurrentStatus = async (req, res) => {
   try {
@@ -315,15 +320,16 @@ const getMachineWeekly = async (req, res) => {
   }
 };
 
+
+
 // ---------- 2) Overview ----------
 const getOverviewToday = async (req, res) => {
   try {
     const today = format(new Date(), 'yyyy-MM-dd');
     const machines = await db.query('db_mltm', 'SELECT id, code, name FROM machines ORDER BY id');
-    const results = [];
 
+    const results = [];
     for (const m of machines) {
-      // current (fallback to unknown if no open interval)
       const currentRow = await db.query(
         'db_mltm',
         `SELECT sc.name AS color, sc.hex, ms.start_time
@@ -335,7 +341,6 @@ const getOverviewToday = async (req, res) => {
       );
       const current = currentRow[0] || { color: 'unknown', hex: '#9E9E9E' };
 
-      // daily buckets for *today* (only G/Y/R)
       const buckets = await db.query(
         'db_mltm',
         `WITH t AS (
@@ -372,7 +377,6 @@ const getOverviewToday = async (req, res) => {
 
 // ---------- 3) Ingest ----------
 // POST /ingest  body: { machine_code, color, at? }
-// POST /ingest   { machine_code, color, at? }
 const postIngest = async (req, res) => {
   try {
     const { machine_code, color, at } = req.body || {};
@@ -426,10 +430,51 @@ const postIngest = async (req, res) => {
   }
 };
 
+// ---------- 4) Touch status (worker input) ----------
+const TOUCH_STATUS_MAP = { 1:'RUN', 2:'SETUP', 3:'WAIT_MAT', 4:'WAIT_TECH', 5:'WAIT_OP' };
+
+// GET /machines/:code/touch/timeline?date=YYYY-MM-DD
+const getTouchTimeline = async (req, res) => {
+  try {
+    const code = req.params.code;
+    const date = req.query.date;
+    if (!date) return res.status(400).json({ error: 'date required' });
+
+    const mid = await getMachineIdCached(code);   // already defined above
+    if (!mid) return res.status(404).json({ error: 'machine not found' });
+
+    const rows = await db.query(
+      'db_esp32',
+      `SELECT
+         mts.touch_status AS status_id,
+         mts.start_touch  AS start_time,
+         mts.end_touch    AS end_time,
+         mts.emp_id       AS emp_id
+       FROM mach_touch_status mts
+      WHERE mts.machine_id = ?
+        AND mts.start_touch < DATE_ADD(?, INTERVAL 1 DAY)
+        AND COALESCE(mts.end_touch, NOW()) > ?
+      ORDER BY mts.start_touch ASC`,
+      [mid, date, date]
+    );
+
+    const out = rows.map(r => ({
+      status_id: Number(r.status_id),
+      status: TOUCH_STATUS_MAP[Number(r.status_id)] || '',
+      start_time: r.start_time,
+      end_time: r.end_time,
+      emp_id: r.emp_id
+    }));
+    res.status(200).json(out);
+  } catch (err) {
+    console.error('getTouchTimeline error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 
 
 // Close previous open interval and start a new one at NOW()
-// POST /ingest/now  body: { machine_code, color }
 // POST /ingest/now  body: { machine_code, color }
 const postIngestNow = async (req, res) => {
   try {
@@ -494,6 +539,7 @@ module.exports = {
   getMachineByDate,
   getMachineTimeline,
   getMachineWeekly,
+  getTouchTimeline,
 
   // dashboards
   getOverviewToday,

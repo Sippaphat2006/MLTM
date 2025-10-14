@@ -12,7 +12,7 @@
 const char* WIFI_SSID = "ADM_CSC_IP_2.4GHz";
 const char* WIFI_PASS = "komataisen2024";
 
-const char* SERVER_BASE   = "http://192.168.0.145:3001/api";
+const char* SERVER_BASE   = "http://192.168.0.124:3001/api";
 const char* EP_NOW        = "/ingest/now";
 const char* EP_UPSERT     = "/ingest/upsert";
 const char* MACHINE_CODE  = "CNC1";
