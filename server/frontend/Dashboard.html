@@ -142,7 +142,7 @@
           <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Run</span></div>
           <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Wait</span></div>
           <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted">Alarm</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off/Sleep</span></div>
         </div>
         <div class="chart-wrap sm"><canvas id="p1Chart"></canvas></div>
       </section>
@@ -159,7 +159,7 @@
           <button class="seg active" data-color="green">Run</button>
           <button class="seg" data-color="yellow">Wait</button>
           <button class="seg" data-color="red">Alarm</button>
-          <button class="seg" data-color="gray">Off</button>
+          <button class="seg" data-color="gray">Off/Sleep</button>
           <button class="seg" data-mode="summary">Summary</button>
         </div>
 
@@ -184,7 +184,7 @@
           <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Run</span></div>
           <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Wait</span></div>
           <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted">Alarm</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off/Sleep</span></div>
         </div>
         <div class="chart-wrap">
           <canvas id="p3Chart"></canvas>
@@ -225,7 +225,7 @@ const API_KEY  = '';
 const SERVER_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
 const COLORS = { green:'#0D8C25', yellow:'#E69400', red:'#EB0000', gray:'#9ca3af',unknown:'#9ca3af' };
-const LABEL  = { green:'Run',  yellow:'Wait',   red:'Alarm' , gray:'Off', unknown:'Off' };
+const LABEL  = { green:'Run',  yellow:'Wait',   red:'Alarm' , gray:'Off/Sleep', unknown:'Off/Sleep' };
 
 const STEP_REFRESH_MS = 1000;
 const DAY_START = { hh:7, mm:30 };
@@ -259,7 +259,7 @@ const previewCap = el('machinePreviewCaption');
 
 let P2_STATUS = 'green';
 let P2_MODE   = 'single'  // 'green' | 'yellow' | 'red'
-const STATUS_LABEL = { green:'Run', yellow:'Wait', red:'Alarm', gray:'Off' };
+const STATUS_LABEL = { green:'Run', yellow:'Wait', red:'Alarm', gray:'Off/Sleep' };
 
 /********************** PLUGINS **********************/
 
@@ -580,7 +580,7 @@ async function drawP2(){
       { label:'Run',   data:g, backgroundColor:COLORS.green, stack:'daily' },
       { label:'Wait',  data:y, backgroundColor:COLORS.yellow, stack:'daily' },
       { label:'Alarm', data:r, backgroundColor:COLORS.red,    stack:'daily' },
-      { label:'Off',   data:o, backgroundColor:COLORS.gray,    stack:'daily' }
+      { label:'Off/Sleep',   data:o, backgroundColor:COLORS.gray,    stack:'daily' }
     ];
     p2Chart.options.scales.x.stacked = true;
     p2Chart.options.scales.y.stacked = true;
