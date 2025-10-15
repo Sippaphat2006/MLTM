@@ -32,6 +32,42 @@ async function getColorIdCached(name){
   return id;
 }
 
+// --- OFF open scheduler ---------//
+const pendingOff = new Map();  // machine_id -> setTimeout handle
+
+function cancelPendingOff(mid){
+  const t = pendingOff.get(mid);
+  if (t) clearTimeout(t);
+  pendingOff.delete(mid);
+}
+
+function scheduleOpenOff(mid){
+  cancelPendingOff(mid);
+  const h = setTimeout(() => openOffIfIdle(mid).catch(console.error), OFF_DELAY_MS);
+  pendingOff.set(mid, h);
+}
+
+// Open a new OFF row if and only if there is still nothing open
+async function openOffIfIdle(mid){
+  pendingOff.delete(mid);
+
+  // still has an open status? then skip
+  const open = await db.query('db_mltm',
+    `SELECT id FROM machine_status
+     WHERE machine_id=? AND end_time IS NULL
+     ORDER BY start_time DESC LIMIT 1`, [mid]);
+  if (open.length) return;
+
+  const offId = await getColorIdCached('gray');
+  if (!offId) { console.warn('[off] status_colors missing "off"'); return; }
+
+  await db.query('db_mltm',
+    `INSERT INTO machine_status (machine_id, color_id, start_time, end_time)
+     VALUES (?, ?, NOW(), NULL)`,
+    [mid, offId]
+  );
+}
+
 // simple in-memory job queue
 const q = [];
 let draining = false;
@@ -53,14 +89,22 @@ function enqueue(job){ q.push(job); setImmediate(drainQueue); }
 // the original DB logic, factored into a function
 async function upsertStatusJob({ machine_code, color, ts }){
   const mid = await getMachineIdCached(machine_code);
-  if (!mid) return;                 // unknown machine (ignore)
-  touchMachine(mid);                // keep watchdog happy
+  if (!mid) return;
+  touchMachine(mid);
 
-  const colorId = await getColorIdCached(color);
-  if (!colorId){                    // treat unknown as "close current open"
-    await closeOpenInterval('db_mltm', mid, ts ? new Date(ts) : new Date());
+  const norm = normalize3(color);
+  const now  = ts ? new Date(ts) : new Date();
+
+  if (norm === 'unknown') {
+    await closeOpenInterval('db_mltm', mid, now);
+    scheduleOpenOff(mid);
     return;
   }
+
+  cancelPendingOff(mid);
+
+  const colorId = await getColorIdCached(norm);
+  if (!colorId) return; // unknown alias guard
 
   const open = await db.query('db_mltm', `
     SELECT id, color_id FROM machine_status
@@ -68,26 +112,22 @@ async function upsertStatusJob({ machine_code, color, ts }){
     ORDER BY start_time DESC LIMIT 1
   `, [mid]);
 
-  const now = ts ? new Date(ts) : new Date();
-
   if (open.length){
-    if (open[0].color_id === colorId) {
-      // same color → nothing to write
-      return;
-    }
+    if (open[0].color_id === colorId) return; // same color → noop
     await db.query('db_mltm','UPDATE machine_status SET end_time=? WHERE id=?',[now, open[0].id]);
   }
-
   await db.query('db_mltm',
     'INSERT INTO machine_status (machine_id,color_id,start_time,end_time) VALUES (?,?,?,NULL)',
     [mid, colorId, now]);
 }
 
+
 // --- config toggles (no .env) ---
 const UNKNOWN_STOPS_TIMER = true;      // close open interval if sensor says "unknown"
 const INACTIVITY_CLOSE_MS = 45000;      // if no ingest for this long, auto-close at last_seen
 const WATCHDOG_TICK_MS    = 15000;      // how often to check inactivity
-const ALLOWED = ['green','yellow','red'];
+const OFF_DELAY_MS = Number(process.env.OFF_DELAY_MS || 5000); // how long to wait before closing "off" status
+const ALLOWED = ['green','yellow','red', 'gray'];
 
 // normalize names coming from devices
 function normalize3(name){
@@ -96,6 +136,7 @@ function normalize3(name){
   if (s==='g') return 'green';
   if (s==='y') return 'yellow';
   if (s==='r') return 'red';
+  if (s==='grey' || s==='gray' || s==='off' || s==='o') return 'gray';
   return ALLOWED.includes(s) ? s : 'unknown';
 }
 
@@ -243,7 +284,7 @@ const getMachineByDate = async (req, res) => {
     UNION ALL SELECT 'yellow', COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) FROM t
     UNION ALL SELECT 'red',    COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t
     UNION ALL SELECT 'blue',   COALESCE(MAX(CASE WHEN color='blue'   THEN seconds END),0) FROM t
-    UNION ALL SELECT 'off',    COALESCE(MAX(CASE WHEN color='off'    THEN seconds END),0) FROM t`;
+    UNION ALL SELECT 'gray',    COALESCE(MAX(CASE WHEN color='gray'    THEN seconds END),0) FROM t`;
 
     const rows = await db.query('db_mltm', sql, [date, date, code, date, date]);
     res.status(200).json(rows);
@@ -303,7 +344,7 @@ const getMachineWeekly = async (req, res) => {
     UNION ALL SELECT 'yellow', COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) FROM t
     UNION ALL SELECT 'red',    COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t
     UNION ALL SELECT 'blue',   COALESCE(MAX(CASE WHEN color='blue'   THEN seconds END),0) FROM t
-    UNION ALL SELECT 'off',    COALESCE(MAX(CASE WHEN color='off'    THEN seconds END),0) FROM t`;
+    UNION ALL SELECT 'gray',    COALESCE(MAX(CASE WHEN color='gray'    THEN seconds END),0) FROM t`;
 
     const out = [];
     for (let i = 0; i < 7; i++) {
@@ -360,7 +401,9 @@ const getOverviewToday = async (req, res) => {
          UNION ALL
          SELECT 'yellow' AS color, COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) FROM t
          UNION ALL
-         SELECT 'red'    AS color, COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t`,
+         SELECT 'red'    AS color, COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t
+         UNION ALL
+         SELECT 'gray'    AS color, COALESCE(MAX(CASE WHEN color='gray'    THEN seconds END),0) FROM t`,
         [today, today, m.id, today, today]
       );
 
@@ -389,11 +432,14 @@ const postIngest = async (req, res) => {
 
     const norm = normalize3(color);
     const ts   = at ? new Date(at) : null;
-
-    if (UNKNOWN_STOPS_TIMER && norm === 'unknown') {
-      const closed = await closeOpenInterval('db_mltm', machineId, ts);
-      return res.status(200).json({ ok:true, action:'closed_on_unknown', closed });
+    
+    if (norm === 'unknown') {
+      await closeOpenInterval('db_mltm', machineId, ts);
+      scheduleOpenOff(machineId); 
+      return res.status(200).json({ ok:true, action:'closed_on_unknown' });
     }
+    cancelPendingOff(machineId);
+
     if (!ALLOWED.includes(norm)) {
       const closed = await closeOpenInterval('db_mltm', machineId, ts);
       return res.status(200).json({ ok:true, action:'closed_on_unknown_alias', closed });

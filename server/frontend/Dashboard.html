@@ -10,7 +10,7 @@
 <style>
   :root{
     --bg:#f6f7fb; --panel:#fff; --muted:#6b7280; --ring:#e5e7eb;
-    --green:#0D8C25; --yellow:#E69400; --red:#EB0000; --grey:#9ca3af;
+    --green:#0D8C25; --yellow:#E69400; --red:#EB0000; --gray:#9ca3af;
   }
   *{box-sizing:border-box}
   /* Full-viewport layout: sticky sidebar + no body scroll */
@@ -135,9 +135,14 @@
         <div class="panel-header">
           <div>
             <div class="title">Machine status / day</div>
-            <div class="muted">Active = Green, Setup = Yellow, Alarm = Red</div>
           </div>
           <div class="picker"><input type="date" id="p1Date"/></div>
+        </div>
+        <div class="legend-row">
+          <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Run</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Wait</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted">Alarm</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off</span></div>
         </div>
         <div class="chart-wrap sm"><canvas id="p1Chart"></canvas></div>
       </section>
@@ -151,9 +156,11 @@
 
         <!-- status selector -->
         <div class="seg-btns" id="p2Status" style="margin-bottom:6px">
-          <button class="seg active" data-color="green">Active</button>
-          <button class="seg" data-color="yellow">Setup</button>
+          <button class="seg active" data-color="green">Run</button>
+          <button class="seg" data-color="yellow">Wait</button>
           <button class="seg" data-color="red">Alarm</button>
+          <button class="seg" data-color="gray">Off</button>
+          <button class="seg" data-mode="summary">Summary</button>
         </div>
 
         <div class="legend-chip">
@@ -174,16 +181,16 @@
           <div class="picker"><input type="date" id="p3Date"/></div>
         </div>
         <div class="legend-row">
-          <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Active</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Setup</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Run</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Wait</span></div>
           <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted">Alarm</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--grey)"></span><span class="muted">No signal</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off</span></div>
         </div>
         <div class="chart-wrap">
           <canvas id="p3Chart"></canvas>
           <div id="p3Tip" class="tip hidden"></div>
         </div>
-        <div class="muted">Time axis pinned: 07:30 → next-day 07:30 (local).</div>
+        <div class="muted">Time axis pinned: 07:30 → next-day 07:30</div>
       </section>
 
       <!-- Panel 4: Worker-reported status over time (5 states) -->
@@ -205,7 +212,7 @@
           <canvas id="p4Chart"></canvas>
           <div id="p4Tip" class="tip hidden"></div>
         </div>
-        <div class="muted">Same time window: 07:30 → next-day 07:30 (local).</div>
+        <div class="muted">Time axis pinned: 07:30 → next-day 07:30</div>
       </section>
 
     </section>
@@ -217,14 +224,13 @@ const API_BASE = 'http://192.168.0.233:3002/api';
 const API_KEY  = '';
 const SERVER_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 
-const COLORS = { green:'#0D8C25', yellow:'#E69400', red:'#EB0000', grey:'#9ca3af',unknown:'#9ca3af' };
-const LABEL  = { green:'Active',  yellow:'Setup',   red:'Alarm' };
+const COLORS = { green:'#0D8C25', yellow:'#E69400', red:'#EB0000', gray:'#9ca3af',unknown:'#9ca3af' };
+const LABEL  = { green:'Run',  yellow:'Wait',   red:'Alarm' , gray:'Off', unknown:'Off' };
 
 const STEP_REFRESH_MS = 1000;
 const DAY_START = { hh:7, mm:30 };
-
 const LIVE_MS = 2000; // how often the dashboard auto-refreshes global stuff
-
+const AUTO_ROLL_MAINDATE = false;
 
 // Panel 4 - touch status (5 states)
 const TOUCH = {
@@ -237,7 +243,7 @@ const TOUCH = {
 
 // === Timeline noise & merge rules (Panel 3) ===
 const P3_NOISE_MS = 2000;
-const P3_MERGE_GAP_MS = Infinity;
+const P3_MERGE_GAP_MS = 300000; // 5 minutes
 
 
 /********************** STATE **********************/
@@ -251,8 +257,9 @@ const tabsEl     = el('machineTabs');
 const previewImg = el('machinePreviewImg');
 const previewCap = el('machinePreviewCaption');
 
-let P2_STATUS = 'green';  // 'green' | 'yellow' | 'red'
-const STATUS_LABEL = { green:'Active', yellow:'Setup', red:'Alarm' };
+let P2_STATUS = 'green';
+let P2_MODE   = 'single'  // 'green' | 'yellow' | 'red'
+const STATUS_LABEL = { green:'Run', yellow:'Wait', red:'Alarm', gray:'Off' };
 
 /********************** PLUGINS **********************/
 
@@ -264,6 +271,7 @@ const candlesPlugin = {
     const colW = Math.max(8, ((right-left)/Math.max(1, bars.length+2)) * 0.6);
 
     ctx.save();
+    // draw candlesticks
     bars.forEach(b=>{
       const cx = x.getPixelForValue(b.idx);
       const y1 = y.getPixelForValue(b.start);
@@ -273,7 +281,7 @@ const candlesPlugin = {
       ctx.fillRect(cx - colW/2, a, colW, h);
     });
 
-    // midnight line (horizontal, at 00:00 inside the 07:30→07:30 window)
+    // midnight line
     if (opts && opts.midnight){
       const my = y.getPixelForValue(opts.midnight);
       if (my>top && my<bottom){
@@ -281,10 +289,74 @@ const candlesPlugin = {
         ctx.beginPath(); ctx.moveTo(left, my); ctx.lineTo(right, my); ctx.stroke(); ctx.setLineDash([]);
       }
     }
+
+    // ⬇️ NEW: draw labels if requested
+    if (opts && opts.labels){
+      ctx.font = '12px Inter, system-ui, -apple-system, Segoe UI, Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = opts.labelColor || '#111827';
+
+      bars.forEach(b=>{
+        const cx = x.getPixelForValue(b.idx);
+        const yStart = y.getPixelForValue(b.start);
+        const yEnd   = y.getPixelForValue(b.end);
+        const yTop   = Math.min(yStart, yEnd);
+        const yBot   = Math.max(yStart, yEnd);
+
+        // per your request:
+        //   start_time under the candlestick, end_time on top of the candlestick
+        const topY = Math.max(top + 10, yTop - 6);
+        const botY = Math.min(bottom - 4, yBot + 12);
+
+        // clamp horizontally inside plot area
+        const cxClamped = Math.min(Math.max(cx, left+10), right-10);
+
+        ctx.fillText(fmtHMS(b.end),   cxClamped, topY); // end_time on top
+        ctx.fillText(fmtHMS(b.start), cxClamped, botY); // start_time under
+      });
+    }
     ctx.restore();
   }
 };
 Chart.register(candlesPlugin);
+
+
+// === P1 value labels (HH:MM) above bars ===
+const p1LabelPlugin = {
+  id: 'p1LabelPlugin',
+  afterDatasetsDraw(chart, args, opts){
+    if (!opts || opts.enabled !== true) return;
+    if (chart.config.type !== 'bar') return;
+
+    const {ctx, chartArea:{top,left,right}, scales:{y}} = chart;
+    const meta = chart.getDatasetMeta(0);
+    const data = chart.data.datasets[0]?.data || [];
+    if (!meta || !meta.data) return;
+
+    ctx.save();
+    ctx.font = '12px Inter, system-ui, -apple-system, Segoe UI, Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = opts?.color || '#111827';
+
+    for (let i=0;i<meta.data.length;i++){
+      const el = meta.data[i];
+      const val = Number(data[i] || 0);
+      if (!el || !isFinite(val) || val<=0) continue;
+
+      const {x, y:py} = el.getProps(['x','y'], true);
+      const yTop = Math.max(top + 4, py - 6);
+      // label text (HH:MM)
+      const txt = fmtDurHMS(val);
+      // keep inside plot area horizontally
+      const xClamped = Math.min(Math.max(x, left+8), right-8);
+      ctx.fillText(txt, xClamped, yTop);
+    }
+    ctx.restore();
+  }
+};
+Chart.register(p1LabelPlugin);
+
 
 
 /********************** HELPERS **********************/
@@ -359,6 +431,8 @@ function fmtDurHMS(sec){
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
 }
 
+
+
 function cleanMergeTimeline(rows, ymd, noiseMs = P3_NOISE_MS, mergeGapMs = P3_MERGE_GAP_MS){
   const { start, end } = rangeOf(ymd);
   const now = Date.now();
@@ -373,9 +447,10 @@ function cleanMergeTimeline(rows, ymd, noiseMs = P3_NOISE_MS, mergeGapMs = P3_ME
     return { c, a, b };
   }).filter(Boolean);
 
-  // ตัดช่วงสั้น (noise)
+  // noise cutting
   segs = segs.filter(s => (s.b - s.a) > noiseMs);
 
+  segs = segs.filter(s => !(s.c === 'gray' && (s.b - s.a) < mergeGapMs));
   // เรียงเวลา
   segs.sort((p,q)=> (p.a - q.a) || (p.b - q.b));
 
@@ -410,7 +485,7 @@ async function apiMachines(){
 async function apiOverviewToday(){ try{ return await fetchJSON('/overview/today'); } catch { return { overview:[] }; } }
 async function apiDailyBuckets(code, ymd){
   const rows = await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-date?date=${encodeURIComponent(ymd)}`);
-  const sec = { green:0, yellow:0, red:0 };
+  const sec = { green:0, yellow:0, red:0 ,gray:0};
   (rows||[]).forEach(r => { const c=(r.color||'').toLowerCase(); if (c in sec) sec[c]+=Number(r.seconds||0); });
   return sec;
 }
@@ -466,25 +541,55 @@ let p1Chart;
 async function drawP1(){
   const ymd = el('p1Date').value;
   const sec = await apiDailyBuckets(ACTIVE, ymd);
-  p1Chart.data.datasets[0].data = [sec.green, sec.yellow, sec.red]; // seconds
+  p1Chart.data.datasets[0].data = [sec.green, sec.yellow, sec.red, sec.gray]; // seconds
   p1Chart.update();
 }
 
 /********************** PANEL 2 – monthly active-only bar **********************/
 let p2Chart;
 async function drawP2(){
-  const ym = el('p2Month').value; // YYYY-MM
+  const ym = el('p2Month').value;               // YYYY-MM
   const d0 = new Date(ym+'-01T00:00:00');
   const days = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
   const labels = Array.from({length:days}, (_,i)=> String(i+1));
+
+  // fetch 1 API per day (same as before)
   const promises = labels.map((_,i)=> apiDailyBuckets(ACTIVE, `${ym}-${pad2(i+1)}`));
   const batch=6, out=[...promises], results=[];
-  while(out.length){ const part=out.splice(0,batch); const vals=await Promise.allSettled(part); results.push(...vals.map(v=> v.status==='fulfilled'? v.value : {green:0,yellow:0,red:0})); }
-  const secs = results.map(sec => (sec[P2_STATUS]||0)); // keep seconds
+  while(out.length){ const part=out.splice(0,batch); const vals=await Promise.allSettled(part); results.push(...vals.map(v=> v.status==='fulfilled'? v.value : {green:0,yellow:0,red:0,gray:0})); }
+
   p2Chart.data.labels = labels;
-  p2Chart.data.datasets[0].data = secs;
+
+  if (P2_MODE === 'single'){
+    const secs = results.map(sec => (sec[P2_STATUS]||0));
+    p2Chart.data.datasets = [{
+      label: `${STATUS_LABEL[P2_STATUS]} time per day`,
+      data: secs,
+      backgroundColor: COLORS[P2_STATUS]
+    }];
+    p2Chart.options.scales.x.stacked = false;
+    p2Chart.options.scales.y.stacked = false;
+    p2Chart.options.plugins.legend.display = false;
+  } else {
+    // stacked 4-color ratio (time stacked per day)
+    const g = results.map(s=>s.green||0);
+    const y = results.map(s=>s.yellow||0);
+    const r = results.map(s=>s.red||0);
+    const o = results.map(s=>s.gray||0);
+    p2Chart.data.datasets = [
+      { label:'Run',   data:g, backgroundColor:COLORS.green, stack:'daily' },
+      { label:'Wait',  data:y, backgroundColor:COLORS.yellow, stack:'daily' },
+      { label:'Alarm', data:r, backgroundColor:COLORS.red,    stack:'daily' },
+      { label:'Off',   data:o, backgroundColor:COLORS.gray,    stack:'daily' }
+    ];
+    p2Chart.options.scales.x.stacked = true;
+    p2Chart.options.scales.y.stacked = true;
+    p2Chart.options.plugins.legend.display = true;
+  }
+
   p2Chart.update();
 }
+
 
 /********************** PANEL 3 – TIMELINE (interval) **********************/
 let p3Chart, p3Timer=null;
@@ -531,12 +636,12 @@ function buildSegments(timeline, ymd){
     let b = r.end_time ? parseLocal(r.end_time).getTime() : Math.min(now, end);
     if (b<=start || a>=end) return;
     a=Math.max(a,start); b=Math.min(b,end);
-    segs.push({start:a,end:b,color:COLORS[c]||COLORS.grey});
+    segs.push({start:a,end:b,color:COLORS[c]||COLORS.gray});
   });
   segs.sort((p,q)=>p.start-q.start);
   const out=[]; let cursor=start;
-  for(const s of segs){ if (s.start>cursor) out.push({start:cursor,end:s.start,color:COLORS.grey}); out.push(s); cursor=Math.max(cursor,s.end); }
-  if (cursor<end) out.push({start:cursor,end:end,color:COLORS.grey});
+  for(const s of segs){ if (s.start>cursor) out.push({start:cursor,end:s.start,color:COLORS.gray}); out.push(s); cursor=Math.max(cursor,s.end); }
+  if (cursor<end) out.push({start:cursor,end:end,color:COLORS.gray});
   return out;
 }
 async function drawP3Once(){
@@ -554,7 +659,7 @@ async function drawP3Once(){
     idx: i + 1,
     start: s.a,
     end:   s.b,
-    color: COLORS[s.c] || COLORS.grey
+    color: COLORS[s.c] || COLORS.gray
   }));
 
   // อัปเดตสเกล/ข้อมูล
@@ -626,7 +731,6 @@ let liveTimer = null;
 
 function startLiveLoops(){
   stopLiveLoops();
-  // keep the interval charts running
   startP3Auto();
   startP4Auto();
 
@@ -652,7 +756,7 @@ function startLiveLoops(){
     }
 
     // 3) auto-roll the main date at the end of window (next 07:30)
-    if (now > end) {
+    if (AUTO_ROLL_MAINDATE && now > end) {
       const nd = toYMDLocal(new Date());
       if (mainDate.value !== nd) {
         mainDate.value = nd;
@@ -670,7 +774,7 @@ function startLiveLoops(){
         startP4Auto();
       }
     }
-  }, LIVE_MS);
+  },LIVE_MS);
 }
 
 function stopLiveLoops(){ if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
@@ -719,29 +823,31 @@ p4Chart = new Chart(el('p4Chart').getContext('2d'),{
 /********************** BOOTSTRAP **********************/
 function wireP2StatusButtons(){
   const wrap = document.getElementById('p2Status');
-  if (!wrap) return; // safety
-
   wrap.addEventListener('click', (e)=>{
-    const btn = e.target.closest('button[data-color]');
+    const btn = e.target.closest('button.seg');
     if(!btn) return;
 
-    P2_STATUS = btn.dataset.color;
-    [...wrap.querySelectorAll('.seg')].forEach(b=>b.classList.toggle('active', b===btn));
+    // toggle active styling
+    [...wrap.querySelectorAll('.seg')].forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
 
-    // reflect in UI + dataset
-    el('p2Title').textContent = `Monthly runtime overview (${STATUS_LABEL[P2_STATUS]})`;
-    el('p2LegendText').textContent = `${STATUS_LABEL[P2_STATUS]} time per day`;
-    el('p2LegendChip').style.background = COLORS[P2_STATUS];
-    el('p4Date').value = toYMDLocal(new Date());
-
-
-    if (p2Chart) {
-      p2Chart.data.datasets[0].label = `${STATUS_LABEL[P2_STATUS]} time per day`;
-      p2Chart.data.datasets[0].backgroundColor = COLORS[P2_STATUS];
-      drawP2();
+    if (btn.dataset.mode === 'summary'){
+      P2_MODE = 'summary';
+      el('p2Title').textContent = 'Monthly status overview (stacked)';
+      el('p2LegendText').textContent = 'Daily stacked ratio';
+      el('p2LegendChip').style.background = 'linear-gradient(90deg,'
+        +`${COLORS.green},${COLORS.yellow},${COLORS.red},${COLORS.gray})`;
+    } else {
+      P2_MODE = 'single';
+      P2_STATUS = btn.dataset.color;
+      el('p2Title').textContent = `Monthly runtime overview (${STATUS_LABEL[P2_STATUS]})`;
+      el('p2LegendText').textContent = `${STATUS_LABEL[P2_STATUS]} time per day`;
+      el('p2LegendChip').style.background = COLORS[P2_STATUS];
     }
+    drawP2();
   });
 }
+
 
 
 (async function boot(){
@@ -757,16 +863,17 @@ function wireP2StatusButtons(){
   p1Chart = new Chart(el('p1Chart').getContext('2d'),{
     type:'bar',
     data:{
-      labels:[LABEL.green, LABEL.yellow, LABEL.red],
+      labels:[LABEL.green, LABEL.yellow, LABEL.red, LABEL.gray],
       datasets:[{
         label:'Time per day',            // was: 'Hours'
-        data:[0,0,0],
-        backgroundColor:[COLORS.green, COLORS.yellow, COLORS.red],
+        data:[0,0,0,0],
+        backgroundColor:[COLORS.green, COLORS.yellow, COLORS.red, COLORS.gray],
         borderWidth:0, categoryPercentage:0.6, barPercentage:0.7
       }]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
+      layout:{ padding:{ top: 18 } },
       scales:{
         y:{
           beginAtZero:true,
@@ -781,6 +888,7 @@ function wireP2StatusButtons(){
       },
       plugins:{
         legend:{ display:false },
+        p1LabelPlugin:{ enabled:true, labelColor:'#111827' },
         tooltip:{
           callbacks:{
             label:(ctx)=> `${ctx.dataset.label}: ${fmtDurHMS(ctx.parsed.y)}`
@@ -822,11 +930,12 @@ function wireP2StatusButtons(){
     type:'scatter',
     data:{ datasets:[{ data:[] }] },
     options:{ responsive:true, maintainAspectRatio:false, parsing:false,
+      layout:{ padding:{ top: 16, bottom: 16 } },
       scales:{
         y:{ type:'time', time:{ unit:'hour', displayFormats:{ hour:'HH:mm' } } },
         x:{ type:'linear', min:0, ticks:{ stepSize:1, precision:0 } }
       },
-      plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null } }
+      plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null,labels:true, labelColor:'#111827' } }
     }
   });
   // hover tooltip for P3

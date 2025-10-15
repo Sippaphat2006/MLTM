@@ -46,4 +46,4 @@ const srv = app.listen(PORT, () => console.log(`Server running on port ${PORT}`)
 // keep these conservative so hung clients don’t tie up sockets
 srv.requestTimeout   = 20000; // 20s
 srv.headersTimeout   = 17000; // 17s
-srv.keepAliveTimeout = 5000;  // 5ss
+srv.keepAliveTimeout = 5000;  // 5s
