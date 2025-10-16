@@ -41,7 +41,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/assets', express.static(path.join(__dirname, 'public', 'assets')));
 
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 30000;
 const srv = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // keep these conservative so hung clients don’t tie up sockets
 srv.requestTimeout   = 20000; // 20s

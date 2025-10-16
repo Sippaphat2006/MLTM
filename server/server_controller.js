@@ -122,11 +122,11 @@ async function upsertStatusJob({ machine_code, color, ts }){
 }
 
 
-// --- config toggles (no .env) ---
+//------------------------------------CONFIG------------------------------------//
 const UNKNOWN_STOPS_TIMER = true;      // close open interval if sensor says "unknown"
-const INACTIVITY_CLOSE_MS = 45000;      // if no ingest for this long, auto-close at last_seen
+const INACTIVITY_CLOSE_MS = 60000;      // if no ingest for this long, auto-close at last_seen
 const WATCHDOG_TICK_MS    = 15000;      // how often to check inactivity
-const OFF_DELAY_MS = Number(process.env.OFF_DELAY_MS || 5000); // how long to wait before closing "off" status
+const OFF_DELAY_MS = Number(process.env.OFF_DELAY_MS || 300000); // how long to wait before closing "off" status
 const ALLOWED = ['green','yellow','red', 'gray'];
 
 // normalize names coming from devices
@@ -361,6 +361,86 @@ const getMachineWeekly = async (req, res) => {
   }
 };
 
+const getMachineStatusByMonth = async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim();
+    const month = String(req.query.month || '').trim(); // YYYY-MM
+
+    // validate params
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return res.status(400).json({ error: "Invalid month format. Use YYYY-MM." });
+    }
+
+    // find machine id
+    const [[machine]] = await db.query(
+      `SELECT id FROM machines WHERE code = ? LIMIT 1`,
+      [code]
+    );
+    if (!machine) return res.status(404).json({ error: "Machine not found" });
+
+    // main query: sum overlap seconds per day & per color
+    // sc.name ควรเก็บเป็น 'green'|'yellow'|'red'|'gray'
+    // ถ้า schema ของคุณใช้คอลัมน์ชื่ออื่น (เช่น sc.color_key) ให้เปลี่ยนชื่อคอลัมน์ในบรรทัด "SELECT sc.name AS color"
+    const sql = `
+      WITH RECURSIVE days(d) AS (
+        SELECT DATE(CONCAT(?, '-01'))
+        UNION ALL
+        SELECT DATE_ADD(d, INTERVAL 1 DAY)
+        FROM days
+        WHERE d < LAST_DAY(CONCAT(?, '-01'))
+      ),
+      base AS (
+        SELECT
+          d AS day,
+          sc.name AS color,
+          GREATEST(
+            0,
+            TIMESTAMPDIFF(
+              SECOND,
+              GREATEST(ms.start_time, d),
+              LEAST(COALESCE(ms.end_time, NOW()), DATE_ADD(d, INTERVAL 1 DAY))
+            )
+          ) AS sec
+        FROM days
+        JOIN machines m ON m.id = ?
+        LEFT JOIN machine_status ms
+          ON ms.machine_id = m.id
+         AND ms.start_time < DATE_ADD(d, INTERVAL 1 DAY)
+         AND COALESCE(ms.end_time, NOW()) > d
+        LEFT JOIN status_colors sc ON sc.id = ms.color_id
+      )
+      SELECT
+        DATE_FORMAT(day, '%Y-%m-%d') AS date,
+        IFNULL(SUM(CASE WHEN color='green'  THEN sec END), 0) AS green,
+        IFNULL(SUM(CASE WHEN color='yellow' THEN sec END), 0) AS yellow,
+        IFNULL(SUM(CASE WHEN color='red'    THEN sec END), 0) AS red,
+        IFNULL(SUM(CASE WHEN color='gray'   THEN sec END), 0) AS gray
+      FROM base
+      GROUP BY day
+      ORDER BY day;
+    `;
+
+    const [rows] = await db.query(sql, [month, month, machine.id]);
+
+    // enrich with active & total, cast เป็น number
+    const data = rows.map(r => {
+      const green  = Number(r.green)  || 0;
+      const yellow = Number(r.yellow) || 0;
+      const red    = Number(r.red)    || 0;
+      const gray   = Number(r.gray)   || 0;
+      const active = green + yellow + red;
+      const total  = active + gray;
+      return { date: r.date, green, yellow, red, gray, active, total };
+    });
+
+    return res.json(data);
+  } catch (err) {
+    console.error('getMachineStatusByMonth error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+
 
 
 // ---------- 2) Overview ----------
@@ -584,8 +664,10 @@ module.exports = {
   getMachineCurrentStatus,
   getMachineByDate,
   getMachineTimeline,
+  getMachineStatusByMonth,
   getMachineWeekly,
   getTouchTimeline,
+  
 
   // dashboards
   getOverviewToday,

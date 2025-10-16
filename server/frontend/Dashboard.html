@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OKUMA CNC Dashboard – Rework</title>
+<title>OKUMA CNC Dashboard</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net"/>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
@@ -246,6 +246,7 @@ const P3_NOISE_MS = 2000;
 const P3_MERGE_GAP_MS = 300000; // 5 minutes
 
 
+
 /********************** STATE **********************/
 let MACHINES = [], MACHINE_META = {}, ACTIVE = null;
 
@@ -291,7 +292,9 @@ const candlesPlugin = {
     }
 
     // ⬇️ NEW: draw labels if requested
+    // draw labels (configurable)
     if (opts && opts.labels){
+      const mode = (opts.labels === true) ? 'both' : String(opts.labels); // 'end' | 'start' | 'both'
       ctx.font = '12px Inter, system-ui, -apple-system, Segoe UI, Arial, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = opts.labelColor || '#111827';
@@ -303,16 +306,13 @@ const candlesPlugin = {
         const yTop   = Math.min(yStart, yEnd);
         const yBot   = Math.max(yStart, yEnd);
 
-        // per your request:
-        //   start_time under the candlestick, end_time on top of the candlestick
         const topY = Math.max(top + 10, yTop - 6);
         const botY = Math.min(bottom - 4, yBot + 12);
-
-        // clamp horizontally inside plot area
         const cxClamped = Math.min(Math.max(cx, left+10), right-10);
 
-        ctx.fillText(fmtHMS(b.end),   cxClamped, topY); // end_time on top
-        ctx.fillText(fmtHMS(b.start), cxClamped, botY); // start_time under
+        // ✅ use HH:MM only
+        if (mode === 'end'  || mode === 'both')  ctx.fillText(fmtHM(b.end),   cxClamped, topY);
+        if (mode === 'start'|| mode === 'both')  ctx.fillText(fmtHM(b.start), cxClamped, botY);
       });
     }
     ctx.restore();
@@ -411,6 +411,14 @@ function fmtHMS(ms){
   return `${hh}:${mm}:${ss}`;
 }
 
+function fmtHM(ms){
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mm = String(d.getMinutes()).padStart(2,'0');
+  return `${hh}:${mm}`;
+}
+
+
 function prettyYMD(ymd){
   // keep your chosen format; tweak if you want localized text
   return ymd; // e.g. new Date(ymd).toLocaleDateString()
@@ -430,6 +438,48 @@ function fmtDurHMS(sec){
   const ss = s % 60;
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
 }
+
+// === Dynamic time-range for timeline (07:30 pin & midnight cut still enforced) ===
+function dynamicYFromCandles(candles, ymd){
+  const { start, end } = rangeOf(ymd);        // 07:30 → next-day 07:30 (ยังคงใช้เหมือนเดิม)
+  if (!candles || candles.length === 0) return { min: start, max: end };
+
+  // earliest interval start (หลังจาก clip แล้ว)
+  const firstStart = candles[0].start;
+  // last interval end (ถ้าวันปัจจุบันให้ดันขึ้นถึง now())
+  const lastEnd    = candles[candles.length - 1].end;
+  const now        = Date.now();
+  const inTodayWin = (now >= start && now <= end);
+
+  let min = Math.max(start, firstStart);
+  let max = Math.min(end, inTodayWin ? Math.max(lastEnd, now) : lastEnd);
+
+  // กันช่วงบางมากจนอ่านไม่ออก — บังคับให้กว้างอย่างน้อย 60 วินาที
+  const MIN_SPAN = 60 * 1000;
+  if (max - min < MIN_SPAN) {
+    const mid = (min + max) / 2;
+    min = Math.max(start, mid - MIN_SPAN/2);
+    max = Math.min(end,   mid + MIN_SPAN/2);
+  }
+  return { min, max };
+}
+
+// เปลี่ยนหน่วย tick อัตโนมัติตามช่วงที่ซูมได้ เพื่อให้อ่านง่าย
+function applyAdaptiveTimeUnits(chart, spanMs){
+  const ONE_H = 3600 * 1000;
+  const opts = chart.options.scales.y.time;
+  if (spanMs <= 1 * ONE_H){
+    opts.unit = 'minute';
+    opts.stepSize = 5;        // ทุก ๆ 5 นาที
+  } else if (spanMs <= 3 * ONE_H){
+    opts.unit = 'minute';
+    opts.stepSize = 10;       // ทุก ๆ 10 นาที
+  } else {
+    opts.unit = 'hour';
+    opts.stepSize = 1;        // ทุกชั่วโมง
+  }
+}
+
 
 
 
@@ -662,14 +712,18 @@ async function drawP3Once(){
     color: COLORS[s.c] || COLORS.gray
   }));
 
-  // อัปเดตสเกล/ข้อมูล
-  p3Chart.options.scales.y.min = start;
-  p3Chart.options.scales.y.max = end;
+  const dyn = dynamicYFromCandles(candles, ymd);
+  p3Chart.options.scales.y.min = dyn.min;
+  p3Chart.options.scales.y.max = dyn.max;
+
+  applyAdaptiveTimeUnits(p3Chart, dyn.max - dyn.min);
+
   p3Chart.options.scales.x.max = candles.length + 1;
   p3Chart.options.plugins.candlesPlugin.midnight = midnight;
   p3Chart.$candles = candles;
   p3Chart.update();
 }
+
 
 
 
@@ -704,16 +758,21 @@ function buildTouchCandles(rows, ymd){
 async function drawP4Once(){
   const ymd = el('p4Date').value;
   const tl  = await apiTouchTimelineSpan(ACTIVE, ymd);
-  const {start,end,midnight} = rangeOf(ymd);
+  const { midnight } = rangeOf(ymd);
+
   const candles = buildTouchCandles(tl, ymd);
 
-  p4Chart.options.scales.y.min = start;
-  p4Chart.options.scales.y.max = end;
+  const dyn = dynamicYFromCandles(candles, ymd);
+  p4Chart.options.scales.y.min = dyn.min;
+  p4Chart.options.scales.y.max = dyn.max;
+  applyAdaptiveTimeUnits(p4Chart, dyn.max - dyn.min);
+
   p4Chart.options.scales.x.max = candles.length + 1;
   p4Chart.options.plugins.candlesPlugin.midnight = midnight;
   p4Chart.$candles = candles;
   p4Chart.update();
 }
+
 
 function startP4Auto(){
   stopP4Auto();
@@ -789,7 +848,7 @@ p4Chart = new Chart(el('p4Chart').getContext('2d'),{
       y:{ type:'time', time:{ unit:'hour', displayFormats:{ hour:'HH:mm' } } },
       x:{ type:'linear', min:0, ticks:{ stepSize:1, precision:0 } }
     },
-    plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null } }
+    plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null, labels:'end', labelColor:'#111827' } }
   }
 });
 
@@ -935,7 +994,7 @@ function wireP2StatusButtons(){
         y:{ type:'time', time:{ unit:'hour', displayFormats:{ hour:'HH:mm' } } },
         x:{ type:'linear', min:0, ticks:{ stepSize:1, precision:0 } }
       },
-      plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null,labels:true, labelColor:'#111827' } }
+      plugins:{ legend:{ display:false }, tooltip:{ enabled:false }, candlesPlugin:{ midnight:null,labels:false, labelColor:'#111827' } }
     }
   });
   // hover tooltip for P3
