@@ -57,7 +57,7 @@
   /* Styles for menu toggle button in the main content area */
   .menu-toggle {
     position: absolute; top: 12px; left: 12px;
-    width: 22px; height: 22px; background: #fff; border-radius: 50%;
+    width: 22px; height: 22px; background: #8e8e8e; border-radius: 50%;
     border: 1px solid var(--ring); cursor: pointer;
     display: none; /* Hidden by default */
     align-items: center; justify-content: center;
@@ -65,7 +65,7 @@
     z-index: 100; /* Ensure it's on top */
   }
   body.sidebar-collapsed .menu-toggle { display: flex; }
-  .menu-toggle .line { background-color: #374151; width: 3px; height: 2px; margin: 2px 0; border-radius: 2px; }
+  .menu-toggle .line { background-color: #374151; width: 18px; height: 2px; margin: 2px 0; border-radius: 2px; }
 
 
   .tabs{display:flex;flex-direction:column;gap:10px;margin-top:8px;overflow:auto;padding-right:4px}
@@ -103,8 +103,8 @@
   .chip{width:10px;height:10px;border-radius:3px;display:inline-block}
 
   .seg-btns{display:flex;gap:6px;flex-wrap:wrap}
-  .seg-btns .seg{border:1px solid #000000;background:#fff;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px} 
-  .seg-btns .seg.active{background:#353535;color:#fff;border-color:#111827}
+  .seg-btns .seg{border:1px solid #d1d5db;background:#fff;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px}
+  .seg-btns .seg.active{background:#111827;color:#fff;border-color:#111827}
 
   .legend-row{display:flex;gap:14px;flex-wrap:wrap;margin:4px 0 6px}
   .date-hero{
@@ -124,7 +124,8 @@
 
   .hero-header{ position:relative; padding:6px 0; min-height:44px; }
   .hero-header .title-wrap{ display:flex; align-items:center; gap:8px; position:relative; z-index:1; } /* New style for title and dot */
-  .hero-header .dot{ width:18px; height:18px; flex-shrink:0; } /* Larger dot for header */
+  .hero-header .title{font-weight:700}
+  .hero-header .dot{ width:18px; height:18px; border-radius:50%; flex-shrink:0; } /* Larger dot for header */
   .date-hero.in-header{
     position:absolute; left:0; right:0; top:50%;
     transform:translateY(-50%);
@@ -158,8 +159,10 @@
     </button>
     <section class="panel compact" id="mainDatePanel">
       <div class="panel-header hero-header">
-        <div class="title-wrap"> <div class="title" id="contextTitle"></div>
-          <span class="dot" id="contextStatusDot"></span> </div>
+        <div class="title-wrap">
+          <div class="title" id="contextTitle"></div>
+          <span class="dot" id="contextStatusDot"></span>
+        </div>
         <div id="mainDateHero" class="date-hero in-header"></div>
         <div class="picker"><input type="date" id="mainDate" /></div>
       </div>
@@ -229,7 +232,7 @@
           <div class="picker"><input type="date" id="p4Date"/></div>
         </div>
         <div class="legend-row">
-          <div class="legend-chip"><span class="chip" style="background:#0D8C25"></span><span class="muted">RUN</span></div>
+          <div class="legend-chip"><span class="chip" style="background:#16a34a"></span><span class="muted">RUN</span></div>
           <div class="legend-chip"><span class="chip" style="background:#f59e0b"></span><span class="muted">SETUP</span></div>
           <div class="legend-chip"><span class="chip" style="background:#0ea5e9"></span><span class="muted">WAIT MAT</span></div>
           <div class="legend-chip"><span class="chip" style="background:#8b5cf6"></span><span class="muted">WAIT TECH</span></div>
@@ -475,7 +478,6 @@ async function apiMachines(){
 async function apiOverviewToday(){
   try{
     const data = await fetchJSON('/overview/today');
-    // Update CURRENT_MACHINE_STATUS based on the fetched data
     const statusMap = {};
     (data.overview || []).forEach(item => {
       const code = item?.machine?.code || item?.CODE;
@@ -485,6 +487,7 @@ async function apiOverviewToday(){
     CURRENT_MACHINE_STATUS = statusMap;
     return data;
   } catch {
+    CURRENT_MACHINE_STATUS = {};
     return { overview:[] };
   }
 }
@@ -499,7 +502,6 @@ async function apiMonthlySummary(code, ym) {
     return await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-month?month=${encodeURIComponent(ym)}`);
   } catch(e) {
     console.warn("Monthly API failed, falling back to daily.", e.message);
-    // Fallback to old method if new API is not available
     const d0 = new Date(ym+'-01T00:00:00');
     const days = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
     const promises = Array.from({length:days}, (_,i) => apiDailyBuckets(ACTIVE, `${ym}-${pad2(i+1)}`));
@@ -507,7 +509,6 @@ async function apiMonthlySummary(code, ym) {
     return results.map((data, i) => ({ date: `${ym}-${pad2(i+1)}`, ...data }));
   }
 }
-
 async function apiTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/timeline?date=${encodeURIComponent(ymd)}`); }
 async function apiTouchTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/touch/timeline?date=${encodeURIComponent(ymd)}`); }
 
@@ -549,7 +550,6 @@ function updateUIState(){
     previewImg.onerror = ()=>{ previewCap.textContent='No photo'; };
     previewImg.src = imagePathFor(ACTIVE);
     
-    // Update main header with machine name and status dot
     contextTitleEl.textContent = `${MACHINE_META[ACTIVE]?.name||ACTIVE}`;
     contextStatusDotEl.style.background = COLORS[CURRENT_MACHINE_STATUS[ACTIVE] || 'unknown'];
     updateMainHero();
@@ -675,42 +675,45 @@ async function startLiveLoops(){
 
   liveTimer = setInterval(async ()=>{
     try {
-      await apiOverviewToday(); // This updates CURRENT_MACHINE_STATUS
-      renderTabs(CURRENT_MACHINE_STATUS); // Re-render tabs with updated status
-      updateUIState(); // Update main header status dot
+      await apiOverviewToday();
+      renderTabs(CURRENT_MACHINE_STATUS);
+      updateUIState();
+    } catch (e) { console.error("Live loop error:", e); }
 
-    } catch (e) {
-      console.error("Live loop error:", e);
-    }
     const ymd = mainDate.value, {start,end}=rangeOf(ymd), now=Date.now();
     if (now >= start && now <= end) drawP1();
-    if (AUTO_ROLL_MAINDATE && now > end) { const nd=toYMDLocal(new Date()); if (mainDate.value!==nd){ setMainDate(nd); } }
+    if (AUTO_ROLL_MAINDATE && now > end) {
+        const nd = toYMDLocal(new Date());
+        if (mainDate.value !== nd) {
+            mainDate.value = nd;
+            mainDate.dispatchEvent(new Event('change')); // Trigger main date change
+        }
+    }
   },LIVE_MS);
 }
 function stopLiveLoops(){ if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
-
-function setMainDate(ymd, sourceEl = null) {
-    if (sourceEl !== mainDate) mainDate.value = ymd;
-    if (sourceEl !== el('p1Date')) el('p1Date').value = ymd;
-    if (sourceEl !== el('p3Date')) el('p3Date').value = ymd;
-    if (sourceEl !== el('p4Date')) el('p4Date').value = ymd;
-
-    const newYm = ymOf(ymd);
-    if (el('p2Month').value !== newYm) el('p2Month').value = newYm;
-
-    refreshAll();
-}
 
 /********************** BOOTSTRAP **********************/
 function wireEventListeners(){
   el('hamburger-close').addEventListener('click', ()=>document.body.classList.add('sidebar-collapsed'));
   el('hamburger-open').addEventListener('click', ()=>document.body.classList.remove('sidebar-collapsed'));
 
-  mainDate.addEventListener('change', (e)=> setMainDate(e.target.value, mainDate));
-  el('p1Date').addEventListener('change', (e)=> setMainDate(e.target.value, el('p1Date')));
-  el('p3Date').addEventListener('change', (e)=> setMainDate(e.target.value, el('p3Date')));
-  el('p4Date').addEventListener('change', (e)=> setMainDate(e.target.value, el('p4Date')));
+  // Main date picker updates ALL panels
+  mainDate.addEventListener('change', ()=>{
+    const ymd = mainDate.value;
+    el('p1Date').value = ymd;
+    el('p3Date').value = ymd;
+    el('p4Date').value = ymd;
+    el('p2Month').value = ymOf(ymd);
+    updateMainHero();
+    refreshAll();
+  });
+
+  // Individual panel pickers update ONLY their own panel
+  el('p1Date').addEventListener('change', ()=> drawP1());
   el('p2Month').addEventListener('change', ()=> drawP2());
+  el('p3Date').addEventListener('change', ()=> startP3Auto());
+  el('p4Date').addEventListener('change', ()=> startP4Auto());
 
   el('p2Status').addEventListener('click', (e)=>{
     const btn = e.target.closest('button.seg'); if(!btn) return;
@@ -729,7 +732,7 @@ function wireEventListeners(){
     }
     drawP2();
   });
-  
+
   const tip3 = el('p3Tip');
   (function attachP3Hover(){
     const c=p3Chart.canvas, hide=()=>tip3.classList.add('hidden'), show=(x,y,t)=>{ tip3.textContent=t;tip3.style.left=(x+12)+'px';tip3.style.top=(y+12)+'px';tip3.classList.remove('hidden'); };
@@ -743,7 +746,7 @@ function wireEventListeners(){
       if(!hit)return hide(); show(xpx,ypx,`${fmtHMS(hit.start)} → ${fmtHMS(hit.end)}`);
     });
   })();
-  
+
   const tip4 = el('p4Tip');
   (function attachP4Hover(){
     const c=p4Chart.canvas, hide=()=>tip4.classList.add('hidden'), show=(x,y,t)=>{ tip4.textContent=t;tip4.style.left=(x+12)+'px';tip4.style.top=(y+12)+'px';tip4.classList.remove('hidden'); };
@@ -786,7 +789,7 @@ function wireEventListeners(){
   wireEventListeners();
 
   await apiMachines();
-  await apiOverviewToday(); // Fetch initial status
+  await apiOverviewToday();
   renderTabs(CURRENT_MACHINE_STATUS);
   
   await refreshAll();
@@ -795,12 +798,12 @@ function wireEventListeners(){
 async function refreshAll(){
   globalErr.textContent='';
   try{
-    updateUIState(); // This will now update the main header's status dot
+    updateUIState();
     await Promise.all([
         drawP1(),
         drawP2(),
     ]);
-    startLiveLoops();
+    startLiveLoops(); // This will restart the loops for p3 and p4
   }catch(e){ globalErr.textContent = e.message||String(e); }
 }
 </script>
