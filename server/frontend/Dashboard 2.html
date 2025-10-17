@@ -497,18 +497,7 @@ async function apiDailyBuckets(code, ymd){
   (rows||[]).forEach(r => { const c=(r.color||'').toLowerCase(); if (c in sec) sec[c]+=Number(r.seconds||0); });
   return sec;
 }
-async function apiMonthlySummary(code, ym) {
-  try {
-    return await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-month?month=${encodeURIComponent(ym)}`);
-  } catch(e) {
-    console.warn("Monthly API failed, falling back to daily.", e.message);
-    const d0 = new Date(ym+'-01T00:00:00');
-    const days = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
-    const promises = Array.from({length:days}, (_,i) => apiDailyBuckets(ACTIVE, `${ym}-${pad2(i+1)}`));
-    const results = await Promise.all(promises);
-    return results.map((data, i) => ({ date: `${ym}-${pad2(i+1)}`, ...data }));
-  }
-}
+
 async function apiTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/timeline?date=${encodeURIComponent(ymd)}`); }
 async function apiTouchTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/touch/timeline?date=${encodeURIComponent(ymd)}`); }
 
@@ -569,42 +558,46 @@ async function drawP1(){
 /********************** PANEL 2 – monthly active-only bar **********************/
 let p2Chart;
 async function drawP2(){
-  try {
-    const ym = el('p2Month').value;
-    const d0 = new Date(ym+'-01T00:00:00');
-    const daysInMonth = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
-    const labels = Array.from({length:daysInMonth}, (_,i)=> String(i+1));
-    p2Chart.data.labels = labels;
+  const ym = el('p2Month').value;               // YYYY-MM
+  const d0 = new Date(ym+'-01T00:00:00');
+  const days = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
+  const labels = Array.from({length:days}, (_,i)=> String(i+1));
 
-    const monthlyData = await apiMonthlySummary(ACTIVE, ym);
-    const results = Array(daysInMonth).fill({green:0,yellow:0,red:0,gray:0});
-    monthlyData.forEach(dayData => {
-        const dayIndex = parseInt(dayData.date.slice(8,10), 10) - 1;
-        if (dayIndex >= 0 && dayIndex < daysInMonth) {
-            results[dayIndex] = dayData;
-        }
-    });
+  // fetch 1 API per day (same as before)
+  const promises = labels.map((_,i)=> apiDailyBuckets(ACTIVE, `${ym}-${pad2(i+1)}`));
+  const batch=6, out=[...promises], results=[];
+  while(out.length){ const part=out.splice(0,batch); const vals=await Promise.allSettled(part); results.push(...vals.map(v=> v.status==='fulfilled'? v.value : {green:0,yellow:0,red:0,gray:0})); }
 
-    if (P2_MODE === 'single'){
-      const secs = results.map(sec => (sec[P2_STATUS]||0));
-      p2Chart.data.datasets = [{ label: `${STATUS_LABEL[P2_STATUS]} time`, data: secs, backgroundColor: COLORS[P2_STATUS] }];
-      p2Chart.options.scales.x.stacked = false;
-      p2Chart.options.scales.y.stacked = false;
-      p2Chart.options.plugins.legend.display = false;
-    } else {
-      const g = results.map(s=>s.green||0), y = results.map(s=>s.yellow||0), r = results.map(s=>s.red||0), o = results.map(s=>s.gray||0);
-      p2Chart.data.datasets = [
-        { label:'Run',   data:g, backgroundColor:COLORS.green, stack:'daily' },
-        { label:'Wait',  data:y, backgroundColor:COLORS.yellow, stack:'daily' },
-        { label:'Alarm', data:r, backgroundColor:COLORS.red,    stack:'daily' },
-        { label:'Off/Sleep', data:o, backgroundColor:COLORS.gray, stack:'daily' }
-      ];
-      p2Chart.options.scales.x.stacked = true;
-      p2Chart.options.scales.y.stacked = true;
-      p2Chart.options.plugins.legend.display = true;
-    }
-    p2Chart.update();
-  } catch(e) { console.error("P2 Error:", e); }
+  p2Chart.data.labels = labels;
+
+  if (P2_MODE === 'single'){
+    const secs = results.map(sec => (sec[P2_STATUS]||0));
+    p2Chart.data.datasets = [{
+      label: `${STATUS_LABEL[P2_STATUS]} time per day`,
+      data: secs,
+      backgroundColor: COLORS[P2_STATUS]
+    }];
+    p2Chart.options.scales.x.stacked = false;
+    p2Chart.options.scales.y.stacked = false;
+    p2Chart.options.plugins.legend.display = false;
+  } else {
+    // stacked 4-color ratio (time stacked per day)
+    const g = results.map(s=>s.green||0);
+    const y = results.map(s=>s.yellow||0);
+    const r = results.map(s=>s.red||0);
+    const o = results.map(s=>s.gray||0);
+    p2Chart.data.datasets = [
+      { label:'Run',   data:g, backgroundColor:COLORS.green, stack:'daily' },
+      { label:'Wait',  data:y, backgroundColor:COLORS.yellow, stack:'daily' },
+      { label:'Alarm', data:r, backgroundColor:COLORS.red,    stack:'daily' },
+      { label:'Off/Sleep',   data:o, backgroundColor:COLORS.gray,    stack:'daily' }
+    ];
+    p2Chart.options.scales.x.stacked = true;
+    p2Chart.options.scales.y.stacked = true;
+    p2Chart.options.plugins.legend.display = true;
+  }
+
+  p2Chart.update();
 }
 
 /********************** PANEL 3 – TIMELINE **********************/
