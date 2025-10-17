@@ -123,7 +123,7 @@ async function upsertStatusJob({ machine_code, color, ts }){
 
 
 //------------------------------------CONFIG------------------------------------//
-const UNKNOWN_STOPS_TIMER = true;      // close open interval if sensor says "unknown"
+const UNKNOWN_STOPS_TIMER = (process.env.UNKNOWN_STOPS_TIMER || 'true') === 'true';      // close open interval if sensor says "unknown"
 const INACTIVITY_CLOSE_MS = 60000;      // if no ingest for this long, auto-close at last_seen
 const WATCHDOG_TICK_MS    = 15000;      // how often to check inactivity
 const OFF_DELAY_MS = Number(process.env.OFF_DELAY_MS || 300000); // how long to wait before closing "off" status
@@ -236,30 +236,8 @@ const getMachines = (req, res) => {
 };
 
 // ---------- 1) Per-machine status ----------
-// GET /machines/:code/status/current
-const getMachineCurrentStatus = async (req, res) => {
-  try {
-    const code = req.params.code;
-    const  m = await db.query('db_mltm', `SELECT id FROM machines WHERE code=? LIMIT 1`, [code]);
-    if (!m.length) return res.status(404).json({ error:'machine not found' });
 
-    const row = await db.query('db_mltm',
-      `SELECT sc.name AS color, sc.hex, ms.start_time
-       FROM machine_status ms
-       JOIN status_colors sc ON sc.id = ms.color_id
-       WHERE ms.machine_id=? AND ms.end_time IS NULL
-       ORDER BY ms.start_time DESC LIMIT 1`, [m[0].id]);
-
-    // IMPORTANT: when nothing open → return 'unknown'
-    if (!row.length) return res.status(200).json(row[0] || { color: 'unknown', hex: '#9E9E9E' });
-    res.status(200).json(row[0]);
-  } catch (err) {
-    console.error('getMachineCurrentStatus error:', err);
-    res.status(500).json({ error:'Internal server error' });
-  }
-};
-
-
+// GET /machines/:code/status/by-date?date=YYYY-MM-DD
 const getMachineByDate = async (req, res) => {
   try {
     const code = req.params.code;
@@ -283,7 +261,6 @@ const getMachineByDate = async (req, res) => {
     SELECT 'green' AS color, COALESCE(MAX(CASE WHEN color='green'  THEN seconds END),0) AS seconds FROM t
     UNION ALL SELECT 'yellow', COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) FROM t
     UNION ALL SELECT 'red',    COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t
-    UNION ALL SELECT 'blue',   COALESCE(MAX(CASE WHEN color='blue'   THEN seconds END),0) FROM t
     UNION ALL SELECT 'gray',    COALESCE(MAX(CASE WHEN color='gray'    THEN seconds END),0) FROM t`;
 
     const rows = await db.query('db_mltm', sql, [date, date, code, date, date]);
@@ -294,149 +271,139 @@ const getMachineByDate = async (req, res) => {
   }
 };
 
-const getMachineTimeline = async (req, res) => {
+// GET /machines/:code/timeline/span?date=YYYY-MM-DD&start_min=450
+const getMachineTimelineSpan = async (req, res) => {
   try {
     const code = req.params.code;
-    const date = req.query.date; // 'YYYY-MM-DD'
-    if (!date) return res.status(400).json({ error: 'date required' });
+    const date = String(req.query.date || '').trim();
+    const startMin = Math.max(0, Math.min(1439, parseInt(req.query.start_min, 10) || 450));
 
-    const rows = await db.query(
-      'db_mltm',
-      `SELECT sc.name AS color, sc.hex, ms.start_time, ms.end_time
-       FROM machine_status ms
-       JOIN status_colors sc ON sc.id = ms.color_id
-       JOIN machines m ON m.id = ms.machine_id
-       WHERE m.code = ?
-         AND ms.start_time < DATE_ADD(?, INTERVAL 1 DAY)
-         AND COALESCE(ms.end_time, NOW()) > ?
-       ORDER BY ms.start_time ASC`,
-      [code, date, date]
-    );
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    }
 
-    res.status(200).json(rows);
-  } catch (err) {
-    console.error('getMachineTimeline error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
+    // ✅ get row array, then use rows[0]
+    const rowsM = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=? LIMIT 1', [code]);
+    if (!rowsM.length) return res.status(404).json({ error: 'machine not found' });
+    const mid = rowsM[0].id;
 
-const getMachineWeekly = async (req, res) => {
-  try {
-    const code = req.params.code;
-    const weekStart = req.query.week_start; // 'YYYY-MM-DD'
-    if (!weekStart) return res.status(400).json({ error: 'week_start required' });
+    // pinned window 07:30 -> next-day 07:30 (no db.escape; paramized)
+    const spanStartExpr = `DATE_ADD(DATE(?), INTERVAL ${startMin} MINUTE)`;
+    const spanEndExpr   = `DATE_ADD(DATE_ADD(DATE(?), INTERVAL 1 DAY), INTERVAL ${startMin} MINUTE)`;
 
-    const sql = `WITH t AS (
-      SELECT sc.name AS color,
-             SUM(TIMESTAMPDIFF(SECOND,
-                 GREATEST(ms.start_time, ?),
-                 LEAST(COALESCE(ms.end_time, NOW()), DATE_ADD(?, INTERVAL 1 DAY))
-             )) AS seconds
+    const rows = await db.query('db_mltm', `
+      SELECT sc.name AS color, sc.hex, ms.start_time, ms.end_time
       FROM machine_status ms
       JOIN status_colors sc ON sc.id = ms.color_id
-      JOIN machines m ON m.id = ms.machine_id
-      WHERE m.code = ?
-        AND ms.start_time < DATE_ADD(?, INTERVAL 1 DAY)
-        AND COALESCE(ms.end_time, NOW()) > ?
-      GROUP BY sc.name
-    )
-    SELECT 'green' AS color, COALESCE(MAX(CASE WHEN color='green'  THEN seconds END),0) AS seconds FROM t
-    UNION ALL SELECT 'yellow', COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) FROM t
-    UNION ALL SELECT 'red',    COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) FROM t
-    UNION ALL SELECT 'blue',   COALESCE(MAX(CASE WHEN color='blue'   THEN seconds END),0) FROM t
-    UNION ALL SELECT 'gray',    COALESCE(MAX(CASE WHEN color='gray'    THEN seconds END),0) FROM t`;
+      WHERE ms.machine_id = ?
+        AND ms.start_time < ${spanEndExpr}
+        AND COALESCE(ms.end_time, NOW()) > ${spanStartExpr}
+      ORDER BY ms.start_time ASC
+    `, [mid, date, date]);
 
-    const out = [];
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(weekStart);
-      d.setDate(d.getDate() + i);
-      const date = d.toISOString().slice(0, 10);
-      const rows = await db.query('db_mltm', sql, [date, date, code, date, date]);
-      out.push({ date, buckets: rows });
-    }
-    res.status(200).json(out);
+    res.json(rows);
   } catch (err) {
-    console.error('getMachineWeekly error:', err);
+    console.error('getMachineTimelineSpan error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-const getMachineStatusByMonth = async (req, res) => {
+// GET /machines/:code/touch/timeline/span?date=YYYY-MM-DD&start_min=450
+const getTouchTimelineSpan = async (req, res) => {
   try {
-    const code = String(req.params.code || '').trim();
-    const month = String(req.query.month || '').trim(); // YYYY-MM
+    const code = req.params.code;
+    const date = String(req.query.date || '').trim();
+    const startMin = Math.max(0, Math.min(1439, parseInt(req.query.start_min, 10) || 450));
 
-    // validate params
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
-      return res.status(400).json({ error: "Invalid month format. Use YYYY-MM." });
+    const mid = await getMachineIdCached(code);
+    if (!mid) return res.status(404).json({ error: 'machine not found' });
+
+    const spanStartExpr = `DATE_ADD(DATE(?), INTERVAL ${startMin} MINUTE)`;
+    const spanEndExpr   = `DATE_ADD(DATE_ADD(DATE(?), INTERVAL 1 DAY), INTERVAL ${startMin} MINUTE)`;
+
+    const rows = await db.query('db_esp32', `
+      SELECT mts.touch_status AS status_id, mts.start_touch AS start_time, mts.end_touch AS end_time, mts.emp_id
+      FROM mach_touch_status mts
+      WHERE mts.machine_id = ?
+        AND mts.start_touch < ${spanEndExpr}
+        AND COALESCE(mts.end_touch, NOW()) > ${spanStartExpr}
+      ORDER BY mts.start_touch ASC
+    `, [mid, date, date]);
+
+    res.json(rows.map(r => ({
+      status_id: Number(r.status_id),
+      status: TOUCH_STATUS_MAP[Number(r.status_id)] || '',
+      start_time: r.start_time,
+      end_time: r.end_time,
+      emp_id: r.emp_id
+    })));
+  } catch (err) {
+    console.error('getTouchTimelineSpan error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const TOUCH_STATUS_MAP = { 1:'RUN', 2:'SETUP', 3:'WAIT_MAT', 4:'WAIT_TECH', 5:'WAIT_OP' };
+
+// GET /machines/:code/status/by-month?month=YYYY-MM
+const getMachineByMonth = async (req, res) => {
+  try {
+    const code  = req.params.code;
+    const month = String(req.query.month || '').trim(); // 'YYYY-MM'
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'month required (YYYY-MM)' });
     }
 
-    // find machine id
-    const [[machine]] = await db.query(
-      `SELECT id FROM machines WHERE code = ? LIMIT 1`,
-      [code]
-    );
-    if (!machine) return res.status(404).json({ error: "Machine not found" });
+    // resolve machine once
+    const m = await db.query('db_mltm', 'SELECT id FROM machines WHERE code=? LIMIT 1', [code]);
+    if (!m.length) return res.status(404).json({ error: 'machine not found' });
+    const mid = m[0].id;
 
-    // main query: sum overlap seconds per day & per color
-    // sc.name ควรเก็บเป็น 'green'|'yellow'|'red'|'gray'
-    // ถ้า schema ของคุณใช้คอลัมน์ชื่ออื่น (เช่น sc.color_key) ให้เปลี่ยนชื่อคอลัมน์ในบรรทัด "SELECT sc.name AS color"
+    const firstDay = month + '-01';
+
+    // MySQL 8 recursive CTE builds one row per calendar day in the month
     const sql = `
-      WITH RECURSIVE days(d) AS (
-        SELECT DATE(CONCAT(?, '-01'))
+      WITH RECURSIVE days AS (
+        SELECT DATE(?) AS d
         UNION ALL
         SELECT DATE_ADD(d, INTERVAL 1 DAY)
         FROM days
-        WHERE d < LAST_DAY(CONCAT(?, '-01'))
+        WHERE DATE_ADD(d, INTERVAL 1 DAY) <= LAST_DAY(?)
       ),
-      base AS (
+      segments AS (
         SELECT
-          d AS day,
+          d.d AS day,
           sc.name AS color,
-          GREATEST(
-            0,
+          SUM(
             TIMESTAMPDIFF(
               SECOND,
-              GREATEST(ms.start_time, d),
-              LEAST(COALESCE(ms.end_time, NOW()), DATE_ADD(d, INTERVAL 1 DAY))
+              GREATEST(ms.start_time, d.d),
+              LEAST(COALESCE(ms.end_time, NOW()), DATE_ADD(d.d, INTERVAL 1 DAY))
             )
-          ) AS sec
-        FROM days
-        JOIN machines m ON m.id = ?
+          ) AS seconds
+        FROM days d
         LEFT JOIN machine_status ms
-          ON ms.machine_id = m.id
-         AND ms.start_time < DATE_ADD(d, INTERVAL 1 DAY)
-         AND COALESCE(ms.end_time, NOW()) > d
+          ON ms.machine_id = ?
+         AND ms.start_time < DATE_ADD(d.d, INTERVAL 1 DAY)
+         AND COALESCE(ms.end_time, NOW()) > d.d
         LEFT JOIN status_colors sc ON sc.id = ms.color_id
+        GROUP BY d.d, sc.name
       )
-      SELECT
-        DATE_FORMAT(day, '%Y-%m-%d') AS date,
-        IFNULL(SUM(CASE WHEN color='green'  THEN sec END), 0) AS green,
-        IFNULL(SUM(CASE WHEN color='yellow' THEN sec END), 0) AS yellow,
-        IFNULL(SUM(CASE WHEN color='red'    THEN sec END), 0) AS red,
-        IFNULL(SUM(CASE WHEN color='gray'   THEN sec END), 0) AS gray
-      FROM base
+      SELECT DATE_FORMAT(day, '%Y-%m-%d') AS date,
+             COALESCE(MAX(CASE WHEN color='green'  THEN seconds END),0) AS green,
+             COALESCE(MAX(CASE WHEN color='yellow' THEN seconds END),0) AS yellow,
+             COALESCE(MAX(CASE WHEN color='red'    THEN seconds END),0) AS red,
+             COALESCE(MAX(CASE WHEN color='gray'   THEN seconds END),0) AS gray
+      FROM segments
       GROUP BY day
       ORDER BY day;
     `;
 
-    const [rows] = await db.query(sql, [month, month, machine.id]);
-
-    // enrich with active & total, cast เป็น number
-    const data = rows.map(r => {
-      const green  = Number(r.green)  || 0;
-      const yellow = Number(r.yellow) || 0;
-      const red    = Number(r.red)    || 0;
-      const gray   = Number(r.gray)   || 0;
-      const active = green + yellow + red;
-      const total  = active + gray;
-      return { date: r.date, green, yellow, red, gray, active, total };
-    });
-
-    return res.json(data);
+    const rows = await db.query('db_mltm', sql, [firstDay, firstDay, mid]);
+    res.status(200).json({ month, days: rows });
   } catch (err) {
-    console.error('getMachineStatusByMonth error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('getMachineByMonth error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -444,6 +411,7 @@ const getMachineStatusByMonth = async (req, res) => {
 
 
 // ---------- 2) Overview ----------
+// GET /overview/today
 const getOverviewToday = async (req, res) => {
   try {
     const today = format(new Date(), 'yyyy-MM-dd');
@@ -556,49 +524,6 @@ const postIngest = async (req, res) => {
   }
 };
 
-// ---------- 4) Touch status (worker input) ----------
-const TOUCH_STATUS_MAP = { 1:'RUN', 2:'SETUP', 3:'WAIT_MAT', 4:'WAIT_TECH', 5:'WAIT_OP' };
-
-// GET /machines/:code/touch/timeline?date=YYYY-MM-DD
-const getTouchTimeline = async (req, res) => {
-  try {
-    const code = req.params.code;
-    const date = req.query.date;
-    if (!date) return res.status(400).json({ error: 'date required' });
-
-    const mid = await getMachineIdCached(code);   // already defined above
-    if (!mid) return res.status(404).json({ error: 'machine not found' });
-
-    const rows = await db.query(
-      'db_esp32',
-      `SELECT
-         mts.touch_status AS status_id,
-         mts.start_touch  AS start_time,
-         mts.end_touch    AS end_time,
-         mts.emp_id       AS emp_id
-       FROM mach_touch_status mts
-      WHERE mts.machine_id = ?
-        AND mts.start_touch < DATE_ADD(?, INTERVAL 1 DAY)
-        AND COALESCE(mts.end_touch, NOW()) > ?
-      ORDER BY mts.start_touch ASC`,
-      [mid, date, date]
-    );
-
-    const out = rows.map(r => ({
-      status_id: Number(r.status_id),
-      status: TOUCH_STATUS_MAP[Number(r.status_id)] || '',
-      start_time: r.start_time,
-      end_time: r.end_time,
-      emp_id: r.emp_id
-    }));
-    res.status(200).json(out);
-  } catch (err) {
-    console.error('getTouchTimeline error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-
 
 // Close previous open interval and start a new one at NOW()
 // POST /ingest/now  body: { machine_code, color }
@@ -625,9 +550,7 @@ const postIngestNow = async (req, res) => {
 
 
 
-// POST /api/ingest/upsert
-// body: { machine_code: "CNC1", color: "green" | "yellow" | "red", ts?: "YYYY-MM-DD HH:mm:ss" }
-
+// POST /api/ingest/upsert body: { machine_code, color, ts? }
 const postUpsertStatus = async (req, res) => {
   try {
     const { machine_code, color, ts } = req.body || {};
@@ -661,15 +584,12 @@ module.exports = {
   getMachines,
 
   // machine status
-  getMachineCurrentStatus,
   getMachineByDate,
-  getMachineTimeline,
-  getMachineStatusByMonth,
-  getMachineWeekly,
-  getTouchTimeline,
-  
+  getMachineTimelineSpan,
+  getTouchTimelineSpan,
+  getMachineByMonth,
 
-  // dashboards
+  // overview
   getOverviewToday,
 
   // ingest

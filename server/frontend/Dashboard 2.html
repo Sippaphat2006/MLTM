@@ -205,7 +205,6 @@
         <div class="loading-overlay"></div>
       </section>
     </section>
-
     <section class="grid">
       <section class="panel" id="p3Panel">
         <div class="panel-header">
@@ -213,11 +212,12 @@
           <div class="picker"><input type="date" id="p3Date"/></div>
         </div>
         <div class="legend-row">
-          <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted">Run</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted">Wait</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted">Alarm</span></div>
-          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted">Off/Sleep</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--green)"></span><span class="muted" id="p3LabGreen">Run</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--yellow)"></span><span class="muted" id="p3LabYellow">Wait</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--red)"></span><span class="muted" id="p3LabRed">Alarm</span></div>
+          <div class="legend-chip"><span class="chip" style="background:var(--gray)"></span><span class="muted" id="p3LabGray">Off/Sleep</span></div>
         </div>
+
         <div class="chart-wrap">
           <canvas id="p3Chart"></canvas>
           <div id="p3Tip" class="tip hidden"></div>
@@ -257,10 +257,17 @@ const SERVER_ORIGIN = API_BASE.replace(/\/api\/?$/, '');
 const COLORS = { green:'#0D8C25', yellow:'#E69400', red:'#EB0000', gray:'#9ca3af',unknown:'#9ca3af' };
 const LABEL  = { green:'Run',  yellow:'Wait',   red:'Alarm' , gray:'Off/Sleep', unknown:'Off/Sleep' };
 
-const STEP_REFRESH_MS = 1000;
+// refresh cadence
+const REFRESH = {
+  p1: 10000,
+  p2: 60000,
+  p3: 10000,
+  p4: 10000,
+  overview: 10000 
+};
 const DAY_START = { hh:7, mm:30 };
-const LIVE_MS = 2000;
-const AUTO_ROLL_MAINDATE = false;
+//const AUTO_ROLL_MAINDATE = false;
+
 
 const TOUCH = {
   1: { key:'RUN',       color:'#16a34a' }, 2: { key:'SETUP',     color:'#f59e0b' },
@@ -419,6 +426,13 @@ function updateMainHero(){ el('mainDateHero').textContent = prettyYMD(mainDate.v
 function fmtDurHM(sec){ let s = Math.max(0, Math.round(sec||0)); const hh=Math.floor(s/3600), mm=Math.floor((s%3600)/60); return `${pad2(hh)}:${pad2(mm)}`; }
 function fmtDurHMS(sec){ let s = Math.max(0, Math.round(sec||0)); const hh=Math.floor(s/3600), mm=Math.floor((s%3600)/60), ss=s%60; return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`; }
 
+function updateP3LegendCounts(counts){
+  document.getElementById('p3LabGreen').textContent  = `Run (${counts.green  || 0})`;
+  document.getElementById('p3LabYellow').textContent = `Wait (${counts.yellow || 0})`;
+  document.getElementById('p3LabRed').textContent    = `Alarm (${counts.red   || 0})`;
+  document.getElementById('p3LabGray').textContent   = `Off/Sleep (${counts.gray || 0})`;
+}
+
 function dynamicYFromCandles(candles, ymd){
   const { start, end } = rangeOf(ymd);
   if (!candles || candles.length === 0) return { min: start, max: end };
@@ -491,6 +505,7 @@ async function apiOverviewToday(){
     return { overview:[] };
   }
 }
+
 async function apiDailyBuckets(code, ymd){
   const rows = await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-date?date=${encodeURIComponent(ymd)}`);
   const sec = { green:0, yellow:0, red:0 ,gray:0};
@@ -498,22 +513,20 @@ async function apiDailyBuckets(code, ymd){
   return sec;
 }
 
+async function apiMonthlyBuckets(code, ym){
+  // GET /machines/:code/status/by-month?month=YYYY-MM
+  return await fetchJSON(`/machines/${encodeURIComponent(code)}/status/by-month?month=${encodeURIComponent(ym)}`);
+}
+
 async function apiTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/timeline?date=${encodeURIComponent(ymd)}`); }
+
 async function apiTouchTimeline(code, ymd){ return await fetchJSON(`/machines/${encodeURIComponent(code)}/touch/timeline?date=${encodeURIComponent(ymd)}`); }
 
 async function apiTimelineSpan(code, ymd, minsAfterMidnight = DAY_START.hh*60 + DAY_START.mm){
-  const nd = nextYMD(ymd);
-  const [today, next] = await Promise.all([apiTimeline(code, ymd), apiTimeline(code, nd)]);
-  const nextMid = parseLocal(nd+'T00:00:00'), cutoff=new Date(nextMid.getTime()+minsAfterMidnight*60000);
-  const nextSlice = (next||[]).filter(r => { const s=parseLocal(r.start_time); return s>=nextMid && s<cutoff; });
-  return [...(today||[]), ...nextSlice];
+  return await fetchJSON(`/machines/${encodeURIComponent(code)}/timeline/span?date=${encodeURIComponent(ymd)}&start_min=${minsAfterMidnight}`);
 }
 async function apiTouchTimelineSpan(code, ymd, minsAfterMidnight = DAY_START.hh*60 + DAY_START.mm){
-  const nd = nextYMD(ymd);
-  const [today, next] = await Promise.all([apiTouchTimeline(code, ymd), apiTouchTimeline(code, nd)]);
-  const nextMid = parseLocal(nd+'T00:00:00'), cutoff=new Date(nextMid.getTime()+minsAfterMidnight*60000);
-  const nextSlice = (next||[]).filter(r => { const s=parseLocal(r.start_time); return s>=nextMid && s<cutoff; });
-  return [...(today||[]), ...nextSlice];
+  return await fetchJSON(`/machines/${encodeURIComponent(code)}/touch/timeline/span?date=${encodeURIComponent(ymd)}&start_min=${minsAfterMidnight}`);
 }
 
 /********************** TABS & UI **********************/
@@ -556,17 +569,20 @@ async function drawP1(){
 }
 
 /********************** PANEL 2 – monthly active-only bar **********************/
-let p2Chart;
 async function drawP2(){
   const ym = el('p2Month').value;               // YYYY-MM
   const d0 = new Date(ym+'-01T00:00:00');
   const days = new Date(d0.getFullYear(), d0.getMonth()+1, 0).getDate();
   const labels = Array.from({length:days}, (_,i)=> String(i+1));
 
-  // fetch 1 API per day (same as before)
-  const promises = labels.map((_,i)=> apiDailyBuckets(ACTIVE, `${ym}-${pad2(i+1)}`));
-  const batch=6, out=[...promises], results=[];
-  while(out.length){ const part=out.splice(0,batch); const vals=await Promise.allSettled(part); results.push(...vals.map(v=> v.status==='fulfilled'? v.value : {green:0,yellow:0,red:0,gray:0})); }
+  // ✅ single request instead of N-per-day
+  const data = await apiMonthlyBuckets(ACTIVE, ym);   // { month, days: [{date, green, yellow, red, gray}, ...] }
+  const map  = Object.fromEntries((data.days||[]).map(d => [d.date, d]));
+  const results = labels.map((_,i) => {
+    const ymd = `${ym}-${pad2(i+1)}`;
+    const r = map[ymd] || {};
+    return { green: +r.green||0, yellow: +r.yellow||0, red: +r.red||0, gray: +r.gray||0 };
+  });
 
   p2Chart.data.labels = labels;
 
@@ -581,16 +597,11 @@ async function drawP2(){
     p2Chart.options.scales.y.stacked = false;
     p2Chart.options.plugins.legend.display = false;
   } else {
-    // stacked 4-color ratio (time stacked per day)
-    const g = results.map(s=>s.green||0);
-    const y = results.map(s=>s.yellow||0);
-    const r = results.map(s=>s.red||0);
-    const o = results.map(s=>s.gray||0);
     p2Chart.data.datasets = [
-      { label:'Run',   data:g, backgroundColor:COLORS.green, stack:'daily' },
-      { label:'Wait',  data:y, backgroundColor:COLORS.yellow, stack:'daily' },
-      { label:'Alarm', data:r, backgroundColor:COLORS.red,    stack:'daily' },
-      { label:'Off/Sleep',   data:o, backgroundColor:COLORS.gray,    stack:'daily' }
+      { label:'Run',        data: results.map(s=>s.green),  backgroundColor: COLORS.green,  stack:'daily' },
+      { label:'Wait',       data: results.map(s=>s.yellow), backgroundColor: COLORS.yellow, stack:'daily' },
+      { label:'Alarm',      data: results.map(s=>s.red),    backgroundColor: COLORS.red,    stack:'daily' },
+      { label:'Off/Sleep',  data: results.map(s=>s.gray),   backgroundColor: COLORS.gray,   stack:'daily' }
     ];
     p2Chart.options.scales.x.stacked = true;
     p2Chart.options.scales.y.stacked = true;
@@ -599,6 +610,30 @@ async function drawP2(){
 
   p2Chart.update();
 }
+
+/******** P1 – auto ********/
+let p1Timer = null;
+function startP1Auto(){
+  stopP1Auto();
+  drawP1();
+  const {start,end} = rangeOf(el('p1Date').value);
+  const now = Date.now();
+  if (now >= start && now <= end) p1Timer = setInterval(drawP1, REFRESH.p1);
+}
+function stopP1Auto(){ if (p1Timer) clearInterval(p1Timer), p1Timer=null; }
+
+/******** P2 – auto (รีเฟรชเฉพาะเดือนปัจจุบัน) ********/
+let p2Timer = null;
+function startP2Auto(){
+  stopP2Auto();
+  drawP2();
+  const curMonth = ymOf(toYMDLocal(new Date()));
+  if (el('p2Month').value === curMonth) {
+    p2Timer = setInterval(drawP2, REFRESH.p2);
+  }
+}
+function stopP2Auto(){ if (p2Timer) clearInterval(p2Timer), p2Timer=null; }
+
 
 /********************** PANEL 3 – TIMELINE **********************/
 let p3Chart, p3Timer=null;
@@ -614,6 +649,11 @@ async function drawP3Once(){
     const tl = await apiTimelineSpan(ACTIVE, ymd);
     const { midnight } = rangeOf(ymd);
     const merged = cleanMergeTimeline(tl, ymd);
+
+    const counts = { green:0, yellow:0, red:0, gray:0 };
+    merged.forEach(s => { if (counts[s.c] != null) counts[s.c]++; });
+    updateP3LegendCounts(counts);
+
     const candles = merged.map((s, i) => ({ idx:i+1, start:s.a, end:s.b, color:COLORS[s.c]||COLORS.gray }));
     const dyn = dynamicYFromCandles(candles, ymd);
     p3Chart.options.scales.y.min = dyn.min; p3Chart.options.scales.y.max = dyn.max;
@@ -624,7 +664,8 @@ async function drawP3Once(){
     p3Chart.update();
   } catch(e) { console.error("P3 Error:", e); }
 }
-function startP3Auto(){ stopP3Auto(); drawP3Once(); const {start,end}=rangeOf(el('p3Date').value), n=Date.now(); if(n>=start&&n<=end)p3Timer=setInterval(drawP3Once,STEP_REFRESH_MS); }
+
+function startP3Auto(){ stopP3Auto(); drawP3Once(); const {start,end}=rangeOf(el('p3Date').value), n=Date.now(); if(n>=start&&n<=end)p3Timer=setInterval(drawP3Once,REFRESH.p3); }
 function stopP3Auto(){ if (p3Timer) clearInterval(p3Timer), p3Timer=null; }
 
 /********************** PANEL 4 – WORKER STATUS **********************/
@@ -656,35 +697,34 @@ async function drawP4Once(){
     p4Chart.update();
   } catch(e) { console.error("P4 Error:", e); }
 }
-function startP4Auto(){ stopP4Auto(); drawP4Once(); const {start,end}=rangeOf(el('p4Date').value), n=Date.now(); if(n>=start&&n<=end)p4Timer=setInterval(drawP4Once,STEP_REFRESH_MS); }
+function startP4Auto(){ stopP4Auto(); drawP4Once(); const {start,end}=rangeOf(el('p4Date').value), n=Date.now(); if(n>=start&&n<=end)p4Timer=setInterval(drawP4Once,REFRESH.p4); }
 function stopP4Auto(){ if (p4Timer) clearInterval(p4Timer), p4Timer=null; }
 
 /********************** LIVE REFRESH & SYNC **********************/
 let liveTimer = null;
 async function startLiveLoops(){
   stopLiveLoops();
+  startP1Auto();
   startP3Auto();
   startP4Auto();
+  startP2Auto();
 
   liveTimer = setInterval(async ()=>{
     try {
       await apiOverviewToday();
       renderTabs(CURRENT_MACHINE_STATUS);
       updateUIState();
-    } catch (e) { console.error("Live loop error:", e); }
-
-    const ymd = mainDate.value, {start,end}=rangeOf(ymd), now=Date.now();
-    if (now >= start && now <= end) drawP1();
-    if (AUTO_ROLL_MAINDATE && now > end) {
-        const nd = toYMDLocal(new Date());
-        if (mainDate.value !== nd) {
-            mainDate.value = nd;
-            mainDate.dispatchEvent(new Event('change')); // Trigger main date change
-        }
+    } catch (e) {
+      console.error("Live loop error:", e);
     }
-  },LIVE_MS);
+  }, REFRESH.overview);
 }
-function stopLiveLoops(){ if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
+function stopLiveLoops(){
+  if (liveTimer) clearInterval(liveTimer), liveTimer=null;
+  stopP1Auto(); stopP2Auto(); stopP3Auto(); stopP4Auto();
+}
+
 
 /********************** BOOTSTRAP **********************/
 function wireEventListeners(){

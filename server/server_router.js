@@ -12,12 +12,11 @@ router.get('/colors', ctrl.getColors);
 router.get('/machines', ctrl.getMachines);
 
 // Per-machine
-router.get('/machines/:code/status/current', ctrl.getMachineCurrentStatus);
 router.get('/machines/:code/status/by-date', ctrl.getMachineByDate);
-router.get('/machines/:code/timeline', ctrl.getMachineTimeline);
-router.get('/machines/:code/status/weekly', ctrl.getMachineWeekly);
-router.get('/machines/:code/status/by-month', ctrl.getMachineStatusByMonth);
-router.get('/machines/:code/touch/timeline', ctrl.getTouchTimeline);
+router.get('/machines/:code/timeline/span', ctrl.getMachineTimelineSpan);
+router.get('/machines/:code/touch/timeline/span', ctrl.getTouchTimelineSpan);
+router.get('/machines/:code/status/by-month', ctrl.getMachineByMonth);
+
 
 
 // Overview
